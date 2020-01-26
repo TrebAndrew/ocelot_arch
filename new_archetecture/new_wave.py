@@ -184,13 +184,14 @@ def generate_gaussian_dfl(xlamds=1e-9, shape=(51, 51, 100), dgrid=(1e-3, 1e-3, 5
     return dfl
 
 class Grid:
-    
     def __init__(self, shape):
         self.dx = []
         self.dy = []
         self.dz = []
-        self.shape = shape 
-        self.xlamds = None #picky point!!!
+        self.shape = shape
+        self.xlamds = None
+        self.used_aprox = 'SVAE'
+        
     def Lz(self):  
         '''
         full longitudinal mesh size
@@ -227,36 +228,45 @@ class Grid:
         '''
         return self.shape[2]
     
-    def x(self):
+    def scale_x(self):
         return np.linspace(-self.Lx() / 2, self.Lx() / 2, self.Nx())
     
-    def kx(self):
+    def scale_kx(self):
         k = 2 * np.pi / self.dx
         return np.linspace(-k / 2, k / 2, self.Nx())
     
-    def y(self):
+    def scale_y(self):
         return np.linspace(-self.Ly() / 2, self.Ly() / 2, self.Ny())
     
     def ky(self):
         k = 2 * np.pi / self.dy
         return np.linspace(-k / 2, k / 2, self.Ny())
 
-    def z(self):
+    def scale_t(self):
+        return self.z()/speed_of_light # must be removed and become the main parameter !!!
+    
+    def scale_w(self):
+        dw = 2 * np.pi * speed_of_light / self.Lz() # self.Lz() must be replaced with self.Tz()
+        
+        if self.xlamds is None:        
+            return np.linspace(-dw / 2 * self.Nz(), dw / 2 * self.Nz(), self.Nz())
+        
+        elif self.used_aprox == 'SVAE' and self.xlamds is not None:
+            w0 = 2 * np.pi * speed_of_light / self.xlamds
+            return np.linspace(w0 - dw / 2 * self.Nz(), w0 + dw / 2 * self.Nz(), self.Nz())
+        
+        else:
+            raise ValueError
+            
+    def scale_z(self):
         return np.linspace(0, self.Lz(), self.Nz())
 
-    def kz(self):
+    def scale_kz(self):
         dk = 2 * np.pi / self.Lz()
-        k = 2 * np.pi / self.xlamds #picky point!!!
+        k = 2 * np.pi / self.xlamds 
         return np.linspace(k - dk / 2 * self.Nz(), k + dk / 2 * self.Nz(), self.Nz())
     
-    def t(self):
-        return self.z/speed_of_light # must be removed and become the main parameter !!!
     
-    def w(self):
-        dw = 2 * np.pi * speed_of_light / self.Lz() # self.Lz() must be replaced with self.Tz()
-        print('no SVEA')
-        return np.linspace(-dw / 2 * self.Nz(), dw / 2 * self.Nz(), self.Nz())
-
 
 class RadiationField(Grid):
     """
@@ -265,31 +275,12 @@ class RadiationField(Grid):
 
     def __init__(self, shape=(0,0,0), xlamds=None):
         super().__init__(shape=shape)
-        self.fld = np.zeros(self.shape, dtype=complex128)  # (z,y,x)
+#        self.fld = np.zeros(self.shape, dtype=complex128)  # (z,y,x)
         self.xlamds = xlamds  # carrier wavelength [m]
         self.domain_z = 't'  # longitudinal domain (t - time, f - frequency)
         self.domain_xy = 's'  # transverse domain (s - space, k - inverse space)
         self.filePath = ''
-#        self.used_approx(approx='SVEA') #slowly varying envelope
-#        
-#    def used_approx(self, approx=None):
-#        if self.xlamds is not None and approx is 'SVEA':
-#            def w(self):
-#                dw = 2 * np.pi * speed_of_light / self.Lz() # 
-#                w0 = 2 * np.pi * speed_of_light / self.xlamds
-#                print('SVEA')
-#                return np.linspace(w0 - dw / 2 * self.Nz(), w0 + dw / 2 * self.Nz(), self.Nz())
-#        else: 
-#            raise ValueError("xlamds must have some value or approx must be 'SVEA'")
-
-    def w(self):
-        dw = 2 * np.pi * speed_of_light / self.Lz() # 
-        w0 = 2 * np.pi * speed_of_light / self.xlamds
-        print('SVEA')
-        return np.linspace(w0 - dw / 2 * self.Nz(), w0 + dw / 2 * self.Nz(), self.Nz())
-
-                
-#        
+                      
     def fileName(self):
         return filename_from_path(self.filePath)
 
@@ -302,7 +293,7 @@ class RadiationField(Grid):
             self.domain_z = dfl1.domain_z
             self.domain_xy = dfl1.domain_xy
             self.filePath = dfl1.filePath
-        elif version == 2:
+        elif version == 2: #does it link the address of these two objects only? : _) then exactly what we need for grid copying
             attr_list = dir(dfl1)
             for attr in attr_list:
                 if attr.startswith('__') or callable(getattr(self, attr)):
@@ -662,7 +653,8 @@ class Mask(Grid):
         return dfl
 
     def get_mask(self, dfl):
-        self.__class__.__base__ = dfl.__class__.__base__
+        pass
+#        self.__class__.__base__ = dfl.__class__.__base__
 
 
 
@@ -672,7 +664,7 @@ class Mask(Grid):
 E_pohoton = 200 #central photon energy [eV]
 kwargs={'xlamds':(h_eV_s * speed_of_light / E_pohoton), #[m] - central wavelength
         'rho':1.0e-4, 
-        'shape':(221,221,1),             #(x,y,z) shape of field matrix (reversed) to dfl.fld
+        'shape':(101,101,11),          #(x,y,z) shape of field matrix (reversed) to dfl.fld
         'dgrid':(400e-5,400e-5,35e-6), #(x,y,z) [m] - size of field matrix
         'power_rms':(25e-5,25e-5,3e-6),#(x,y,z) [m] - rms size of the radiation distribution (gaussian)
         'power_center':(0,0,None),     #(x,y,z) [m] - position of the radiation distribution
@@ -681,13 +673,14 @@ kwargs={'xlamds':(h_eV_s * speed_of_light / E_pohoton), #[m] - central wavelengt
         'wavelength':None,             #central frequency of the radiation, if different from xlamds
         'zsep':None,                   #distance between slices in z as zsep*xlamds
         'freq_chirp':0,                #dw/dt=[1/fs**2] - requency chirp of the beam around power_center[2]
-        'en_pulse':None,                #total energy or max power of the pulse, use only one
+        'en_pulse':None,               #total energy or max power of the pulse, use only one
         'power':1e6,
         }
 #
-#dfl = generate_dfl(**kwargs);  #Gaussian beam defenition
 #
-dfl = RadiationField((100,100,10), 1e-9)
+dfl = RadiationField()
+dfl = generate_dfl(**kwargs);  #Gaussian beam defenition
+
 app = Mask().get_mask(dfl)
 dfl.dx = 1.8e-5
 dfl.dy = 1.8e-5
