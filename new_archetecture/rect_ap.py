@@ -14,7 +14,7 @@ E_pohoton = 1239.8#200 #central photon energy [eV]
 
 kwargs={'xlamds':(h_eV_s * speed_of_light / E_pohoton), #[m] - central wavelength
         'rho':1.0e-4, 
-        'shape':(101,101,11),             #(x,y,z) shape of field matrix (reversed) to dfl.fld
+        'shape':(201,201,1),             #(x,y,z) shape of field matrix (reversed) to dfl.fld
         'dgrid':(400e-5,400e-5,35e-6), #(x,y,z) [m] - size of field matrix
         'power_rms':(25e-5,25e-5,4e-6),#(x,y,z) [m] - rms size of the radiation distribution (gaussian)
         'power_center':(0,0,None),     #(x,y,z) [m] - position of the radiation distribution
@@ -30,8 +30,8 @@ kwargs={'xlamds':(h_eV_s * speed_of_light / E_pohoton), #[m] - central wavelengt
 #dfl = RadiationField()
 dfl = generate_gaussian_dfl(**kwargs);  #Gaussian beam defenition
 
-appRect =  ApertureRectMask(lx=3e-4, ly=3e-4, cx=0, cy=0)
-prop =  Prop_mMask(z0=10, mx=1, my=1)
+appRect =  ApertureRectMask(lx=9e-4, ly=9e-4, cx=0, cy=0)
+prop =  PropMask(z0=30)
 
 appRect.apply(dfl)
 prop.apply(dfl)
