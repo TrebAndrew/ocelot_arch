@@ -3,8 +3,9 @@ import logging
 _logger = logging.getLogger(__name__) 
 
 from ocelot.gui.genesis_plot import *
-from ocelot.optics.new_wave import RadiationField, generate_gaussian_dfl
+from ocelot.optics.wave import RadiationField, generate_gaussian_dfl
 
+import pickle
 
 import numpy as np
 from copy import deepcopy
@@ -18,6 +19,161 @@ except ImportError:
     print("wave.py: module PYFFTW is not installed. Install it if you want speed up dfl wavefront calculations")
     fftw_avail = False
 
+
+#%%
+def dfl_plot_xz(dfl, whichis_derectrion='x', plot_proj=True, plot_slice=True, E_slice=None, log_scale=False,
+                x_units = 'mm', E_ph_units = 'eV', fig_name = 'dfl_plot_xz', figsize = 3,
+                cmap='Greys'):
+    
+    _logger.info('plotting {} vs. energy distribution'.format(whichis_derectrion))
+#    
+    if dfl.domain_z == 't':#make it universal for both domains
+        dfl.to_domain('f')
+    if dfl.domain_xy == 'k': #make it universal for both domains
+        dfl.to_domain('s')
+        
+    I = dfl.intensity()
+    
+    I_units_phsmmbw='$\gamma/s/mm^2/0.1\%bw$'
+    I_units_phsbw='$\gamma/s/0.1\%bw$'
+    
+    if whichis_derectrion == 'x':
+        x = dfl.scale_x()
+        I_xz = I[:,dfl.Ny() // 2,:].T
+        if x_units == 'mm':
+            x = x * 1e3
+            x_label_txt = 'x, [mm]' 
+        elif x_units == 'um':
+            x = x * 1e6
+            x_label_txt = '$x, [\mu m]$'
+        else:
+            raise ValueError('Incorrect units error')
+    elif whichis_derectrion == 'y':
+        x = dfl.scale_y()
+        I_xz = I[:,:,dfl.Ny() // 2].T
+        if x_units == 'mm':
+            x = x * 1e3
+            x_label_txt = 'y, [mm]' 
+        elif x_units == 'um':
+            x = x * 1e6
+            x_label_txt = '$y, [\mu m]$'
+        else:
+            raise ValueError('Incorrect units error')
+    else:
+        raise ValueError('"whichis_derectrion" must be "x" or "y"')
+
+    E_ph = h_eV_s * dfl.scale_kz() * speed_of_light/2/np.pi                 
+    if E_ph_units in ['eV', 'ev']:
+        E_label_txt = '$E_{\gamma}$ [eV]'    
+    elif y_units in ['keV', 'kev']:
+        E_ph = E_ph * 1e-3
+        E_label_txt = '$E_{photon}$ [keV]'    
+    else:
+        raise ValueError('Incorrect units')
+    
+    if E_slice is None:
+        E_slice_idx = dfl.Nz()//2
+    elif E_slice == 'max':
+        E_slice_idx = np.argmax(I[:,dfl.Ny()//2,dfl.Nx()//2], axis=0)
+    elif E_slice >= np.min(E_ph) and E_slice <= np.max(E_ph):
+        E_slice_idx = min(range(len(E_ph)), key=lambda i: abs(E_ph[i]-E_slice))
+    else:
+        raise ValueError('Incorrect "E_slice" value, it can be None or some photon energy in the [{},{}] range or "max"'.format(round(np.min(E_ph)),round(np.max(E_ph))))
+    if E_slice_idx is not None:
+        E_slice = E_ph[E_slice_idx]
+        print(E_slice)
+    
+    fig = plt.figure(fig_name)
+    plt.clf()
+    fig.set_size_inches((4.5 * figsize, 3.25 * figsize))#, forward=True)
+    
+    if plot_proj:
+        #definitions for the axes
+        left, width = 0.18, 0.57
+        bottom, height = 0.14, 0.55
+        left_h = left + width + 0.02 - 0.02
+        bottom_h = bottom + height + 0.02 - 0.02
+    
+        rect_scatter = [left, bottom, width, height]
+        rect_histx = [left, bottom_h, width, 0.2]
+        rect_histy = [left_h, bottom, 0.15, height]
+    
+        axHistx = plt.axes(rect_histx)
+        axHisty = plt.axes(rect_histy)
+        
+        axScatter = plt.axes(rect_scatter, sharex=axHistx, sharey=axHisty)
+    else:
+        axScatter = plt.axes()
+    
+    
+    if log_scale is True: 
+        log=0.01
+        I_lim = np.amax(I)
+        axScatter.pcolormesh(E_ph, x, I_xz, cmap=cmap, 
+                                             norm=colors.SymLogNorm(linthresh=I_lim * log, linscale=2,
+                                                  vmin=-I_lim, vmax=I_lim),
+                                                                    vmax=I_lim, vmin=-I_lim)
+    else:
+        axScatter.pcolormesh(E_ph, x, I_xz, cmap=cmap)
+    
+    axScatter.set_ylabel(x_label_txt, fontsize=18)
+    axScatter.set_xlabel(E_label_txt, fontsize=18)
+
+    if plot_slice:
+        
+        I_xy = I[:, dfl.Nx() // 2, dfl.Ny() // 2]
+        if whichis_derectrion == 'x':
+            I_x  = I[E_slice_idx, :, dfl.Ny() // 2]
+        elif whichis_derectrion == 'y':
+            I_x  = I[E_slice_idx, dfl.Ny() // 2, :]
+        else:
+            raise ValueError('"whichis_derectrion" must be "x" or "y"')
+
+        axHistx.plot(E_ph, I_xy, color='blue', label="on-axis")
+        axHisty.plot(I_x, x, color='blue')
+        axHistx.legend(bbox_to_anchor=(1.1, 1), loc='upper left', borderaxespad=0.)
+        axHisty.text(1, 1.3,r'slise $\;at = {}$eV'.format(round(E_slice)), 
+                     horizontalalignment='left', verticalalignment='top', fontsize=14)    
+        if log_scale is True:
+            axHistx.set_yscale('log')
+            axHisty.set_xscale('log')
+        else:
+            axHistx.ticklabel_format(style='sci', axis='y', useOffset=True, scilimits=(0,0))
+            axHisty.ticklabel_format(style='sci', axis='x', useOffset=True, scilimits=(0,0))
+      
+        axHisty.set_xlabel(I_units_phsmmbw, fontsize=18, color='blue')
+        axHistx.set_ylabel(I_units_phsmmbw, fontsize=18, color='blue')
+        axHisty.xaxis.labelpad = 20
+        axHistx.yaxis.labelpad = 20
+       
+        axScatter.axis('tight')
+        
+        xticks = axHistx.yaxis.get_major_ticks()
+        xticks[1].set_visible(False)
+        
+    if plot_proj:
+        I_xy = np.sum(dfl.intensity(), axis=(1, 2))*dfl.dx*dfl.dy * (1e3)**2
+        
+        ax1 = axHistx.twinx()
+        ax1.plot(E_ph, I_xy, '--',color='black', label="integrated")
+        ax1.legend(bbox_to_anchor=(1.1, 0.75), loc='upper left', borderaxespad=0.)
+
+        ax1.set_ylabel(I_units_phsbw, fontsize=18, color='black')
+        if log_scale is True:
+            ax1.set_yscale('log')
+        else:
+            ax1.ticklabel_format(style='sci', axis='y', useOffset=True, scilimits=(0,0))
+    
+        axScatter.axis('tight')
+        
+        for tl in axHistx.get_xticklabels():
+            tl.set_visible(False)
+        for tl in axHisty.get_yticklabels():
+            tl.set_visible(False)
+            
+#    plt.legend(bbox_to_anchor=(1.1, 1), loc='upper left', borderaxespad=0.)
+    plt.show()
+
 #%%
 #optics elements check
 dfl = RadiationField()
@@ -26,7 +182,7 @@ kwargs={'xlamds':(h_eV_s * speed_of_light / E_pohoton), #[m] - central wavelengt
         'rho':1.0e-4, 
         'shape':(101,101,51),             #(x,y,z) shape of field matrix (reversed) to dfl.fld
         'dgrid':(400e-5,400e-5,35e-6), #(x,y,z) [m] - size of field matrix
-        'power_rms':(25e-5,25e-5,4e-6),#(x,y,z) [m] - rms size of the radiation distribution (gaussian)
+        'power_rms':(25e-5,35e-5,1e-6),#(x,y,z) [m] - rms size of the radiation distribution (gaussian)
         'power_center':(0,0,None),     #(x,y,z) [m] - position of the radiation distribution
         'power_angle':(0,0),           #(x,y) [rad] - angle of further radiation propagation
         'power_waistpos':(0,0),        #(Z_x,Z_y) [m] downstrean location of the waist of the beam
@@ -37,129 +193,23 @@ kwargs={'xlamds':(h_eV_s * speed_of_light / E_pohoton), #[m] - central wavelengt
         'power':1e6,
         }
 
-dfl = generate_gaussian_dfl(**kwargs);  #Gaussian beam defenition
+print('extracting wfr from files')
 #%%
-fig_text = 'plot_xz'
-figsize = 3
-plot_proj = True
-plot_slice = True
-log_scale = False
-cmap='Greys'
-x_units = 'mm'
-y_units = 'mm'
-E_ph_units = 'eV'
-_logger.info('plotting x vs. energy distribution')
+wfrPathName='/home/andre/Documents/1_term_master_s/Sec_und_paper/code/fields/'
+wfr1FileName = 'screen_sectional_15_ac04.scr'
+afile = open(wfrPathName + wfr1FileName, 'rb')
+#wfr1   =  pickle.load(afile)
+screen   =  pickle.load(afile)
+afile.close()
+dfl = screen2dfl(screen, polarization='x', current=0.4, gamma=3.0/m_e_GeV)
 
-I = dfl.intensity()
-I_units_phsmmbw='$\gamma/s/mm^2/0.1\%bw$'
-I_units_phsbw='$\gamma/s/0.1\%bw$'
-x = dfl.scale_x()
-if x_units == 'mm':
-    x = x * 1e3
-    x_label_txt = 'x, [mm]' 
-elif x_units == 'um':
-    x = x * 1e6
-    x_label_txt = '$x, [\mu m]$'
-else:
-    raise ValueError('Incorrect units error')
+#dfl = generate_gaussian_dfl(**kwargs)  #Gaussian beam defenition
 
-y = dfl.scale_y()
-if y_units == 'mm':
-    y = y * 1e3
-elif y_units == 'um':
-    y = y * 1e6
-else:
-    raise ValueError('Incorrect units')
-    
-if E_ph_units in ['eV', 'ev']:
-    E_ph = h_eV_s * dfl.grid_w()
-    E_label_txt = '$E_{photon}$ [eV]'    
-elif y_units in ['keV', 'kev']:
-    E_ph = E_ph = h_eV_s * dfl.grid_w() * 1e-3
-    E_label_txt = '$E_{photon}$ [keV]'    
-else:
-    raise ValueError('Incorrect units')
+#write_dfl_file(dfl, filePath='/home/andre/Desktop/field.fld')
 
+#dfl = read_dfl_file(filePath='/home/andre/Desktop/field.fld', Nxy=101, Lxy=25e-5)
 
-fig = plt.figure(fig_text)
-plt.clf()
-fig.set_size_inches((4.5 * figsize, 3.25 * figsize), forward=True)
-
-if plot_proj:
-    #definitions for the axes
-    left, width = 0.18, 0.57
-    bottom, height = 0.14, 0.55
-    left_h = left + width + 0.02 - 0.02
-    bottom_h = bottom + height + 0.02 - 0.02
-
-    rect_scatter = [left, bottom, width, height]
-    rect_histx = [left, bottom_h, width, 0.2]
-    rect_histy = [left_h, bottom, 0.15, height]
-
-    axHistx = plt.axes(rect_histx)
-    axHisty = plt.axes(rect_histy)
-    
-    axScatter = plt.axes(rect_scatter, sharex=axHistx, sharey=axHisty)
-else:
-    axScatter = plt.axes()
-
-if log_scale != 0:
-    if log_scale==1: 
-        log_scale=0.01
-    I_lim = np.amax(I)
-    axScatter.pcolormesh(E_ph, x, I[:,dfl.Ny() // 2,:].T, cmap=cmap, 
-                                         norm=colors.SymLogNorm(linthresh=I_lim * log_scale, linscale=2,
-                                              vmin=-I_lim, vmax=I_lim),
-                                                                vmax=I_lim, vmin=-I_lim)
-else:
-    axScatter.pcolormesh(E_ph, x, I[:,dfl.Ny() // 2,:].T, cmap=cmap)
-
-axScatter.set_ylabel(x_label_txt, fontsize=18)
-axScatter.set_xlabel(E_label_txt, fontsize=18)
-if plot_slice:
-    
-    I_xy = I[:, dfl.Nx() // 2, dfl.Ny() // 2]
-    I_x  = I[dfl.Nz() // 2, :, dfl.Ny() // 2]
-    
-    axHistx.plot(E_ph, I_xy, color='blue')
-    axHisty.plot(I_x, x, color='blue')
-    
-    axHisty.set_xlabel(I_units_phsmmbw, fontsize=18, color='blue')
-    axHistx.set_ylabel(I_units_phsmmbw, fontsize=18, color='blue')
-    
-#    ax2.set_ylabel(I_units_phsbw, fontsize=18, color='black')
-    
-    axScatter.axis('tight')
-      
-    for tl in ax1.get_xticklabels():
-        tl.set_visible(False)
-    for tl in ax1.get_yticklabels():
-        tl.set_visible(False)
-    ax2.tick_params(labelright='off')
-    
-    xticks = axHistx.yaxis.get_major_ticks()
-    xticks[1].set_visible(False)
-    
-if plot_proj:
-    I_xy = np.sum(dfl.intensity(), axis=(1, 2))
-    
-    ax1 = axHistx.twinx()
-    ax1.plot(E_ph, I_xy, '--',color='black')
-    ax1.set_ylabel(I_units_phsbw, fontsize=18, color='black')
-
-    axScatter.axis('tight')
-
-  
-    for tl in axHistx.get_xticklabels():
-        tl.set_visible(False)
-    for tl in axHisty.get_yticklabels():
-        tl.set_visible(False)
-        
-plt.show()
-#%%
-
-
-
+dfl_plot_xz(dfl, E_slice='max')
 
 
 
