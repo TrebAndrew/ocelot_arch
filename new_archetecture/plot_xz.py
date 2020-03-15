@@ -21,12 +21,16 @@ except ImportError:
 
 
 #%%
-def dfl_plot_xz(dfl, whichis_derectrion='x', plot_proj=True, plot_slice=True, E_slice=None, log_scale=False,
-                x_units = 'mm', E_ph_units = 'eV', fig_name = 'dfl_plot_xz', figsize = 3,
-                cmap='Greys'):
-    
+def plot_dfl_xz(dfl, whichis_derectrion='x', plot_proj=True, plot_slice=True, E_slice=None, log_scale=False,
+                x_units = 'mm', E_ph_units = 'eV', figsize = 3,
+                cmap='Greys', fig_name='dfl_plot_xz', showfig=True, savefig=False):
+
+    start_time = time.time()
+
     _logger.info('plotting {} vs. energy distribution'.format(whichis_derectrion))
-#    
+
+    filePath = dfl.filePath
+    
     if dfl.domain_z == 't':#make it universal for both domains
         dfl.to_domain('f')
     if dfl.domain_xy == 'k': #make it universal for both domains
@@ -132,7 +136,7 @@ def dfl_plot_xz(dfl, whichis_derectrion='x', plot_proj=True, plot_slice=True, E_
         axHistx.plot(E_ph, I_xy, color='blue', label="on-axis")
         axHisty.plot(I_x, x, color='blue')
         axHistx.legend(bbox_to_anchor=(1.1, 1), loc='upper left', borderaxespad=0.)
-        axHisty.text(1, 1.3,r'slise $\;at = {}$eV'.format(round(E_slice)), 
+        axHisty.text(0.01*np.max(I_x), 0.9*np.max(x), r'slise $\;at = {}$eV'.format(round(E_slice)), 
                      horizontalalignment='left', verticalalignment='top', fontsize=14)    
         if log_scale is True:
             axHistx.set_yscale('log')
@@ -157,8 +161,8 @@ def dfl_plot_xz(dfl, whichis_derectrion='x', plot_proj=True, plot_slice=True, E_
         ax1 = axHistx.twinx()
         ax1.plot(E_ph, I_xy, '--',color='black', label="integrated")
         ax1.legend(bbox_to_anchor=(1.1, 0.75), loc='upper left', borderaxespad=0.)
-
         ax1.set_ylabel(I_units_phsbw, fontsize=18, color='black')
+ 
         if log_scale is True:
             ax1.set_yscale('log')
         else:
@@ -171,7 +175,23 @@ def dfl_plot_xz(dfl, whichis_derectrion='x', plot_proj=True, plot_slice=True, E_
         for tl in axHisty.get_yticklabels():
             tl.set_visible(False)
             
-#    plt.legend(bbox_to_anchor=(1.1, 1), loc='upper left', borderaxespad=0.)
+    plt.draw()
+    if savefig != False:
+        if savefig == True:
+            savefig = 'png'
+            print('here')
+        _logger.debug(ind_str + 'saving *.{:}'.format(savefig))
+        fig.savefig(filePath + fig_name + '.' + str(savefig), format=savefig)
+    _logger.debug(ind_str + 'done in {:.2f} seconds'.format(time.time() - start_time))
+    
+    plt.draw()
+    if showfig == True:
+        _logger.debug(ind_str + 'showing dfl')
+        rcParams["savefig.directory"] = os.path.dirname(filePath)
+        plt.show()
+    else:        
+        plt.close(fig)
+
     plt.show()
 
 #%%
@@ -195,21 +215,18 @@ kwargs={'xlamds':(h_eV_s * speed_of_light / E_pohoton), #[m] - central wavelengt
 
 print('extracting wfr from files')
 #%%
-wfrPathName='/home/andre/Documents/1_term_master_s/Sec_und_paper/code/fields/'
-wfr1FileName = 'screen_sectional_15_ac04.scr'
-afile = open(wfrPathName + wfr1FileName, 'rb')
+#wfrPathName='/home/andre/Documents/1_term_master_s/Sec_und_paper/code/fields/'
+#wfr1FileName = 'segmented_undulator.scr'
+
+#afile = open(wfrPathName + wfr1FileName, 'rb')
 #wfr1   =  pickle.load(afile)
-screen   =  pickle.load(afile)
-afile.close()
-dfl = screen2dfl(screen, polarization='x', current=0.4, gamma=3.0/m_e_GeV)
+#screen   =  pickle.load(afile)
+#afile.close()
+#dfl = screen2dfl(screen, polarization='x', current=0.4, gamma=3.0/m_e_GeV)
 
-#dfl = generate_gaussian_dfl(**kwargs)  #Gaussian beam defenition
-
-#write_dfl_file(dfl, filePath='/home/andre/Desktop/field.fld')
-
-#dfl = read_dfl_file(filePath='/home/andre/Desktop/field.fld', Nxy=101, Lxy=25e-5)
-
-dfl_plot_xz(dfl, E_slice='max')
+dfl.filePath = '/home/andre/Desktop/'
+dfl = generate_gaussian_dfl(**kwargs)  #Gaussian beam defenition
+plot_dfl_xz(dfl, E_slice='max', savefig=True)
 
 
 
