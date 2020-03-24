@@ -133,11 +133,11 @@ def plot_dfl_xz(dfl, whichis_derectrion='x', plot_proj=True, plot_slice=True, E_
         else:
             raise ValueError('"whichis_derectrion" must be "x" or "y"')
 
-        axHistx.plot(E_ph, I_xy, color='blue', label="on-axis")
+        axHistx.plot(E_ph, I_xy, color='blue', label="on-axis, \nxy slise at\n{} eV".format(round(E_slice)))
         axHisty.plot(I_x, x, color='blue')
-        axHistx.legend(bbox_to_anchor=(1.1, 1), loc='upper left', borderaxespad=0.)
-        axHisty.text(0.01*np.max(I_x), 0.9*np.max(x), r'slise $\;at = {}$eV'.format(round(E_slice)), 
-                     horizontalalignment='left', verticalalignment='top', fontsize=14)    
+        axHistx.legend(bbox_to_anchor=(1.08, 1), loc='upper left', borderaxespad=0.)
+        
+        
         if log_scale is True:
             axHistx.set_yscale('log')
             axHisty.set_xscale('log')
@@ -160,7 +160,8 @@ def plot_dfl_xz(dfl, whichis_derectrion='x', plot_proj=True, plot_slice=True, E_
         
         ax1 = axHistx.twinx()
         ax1.plot(E_ph, I_xy, '--',color='black', label="integrated")
-        ax1.legend(bbox_to_anchor=(1.1, 0.75), loc='upper left', borderaxespad=0.)
+        ax1.legend(bbox_to_anchor=(1.08, 0.5), loc='upper left', borderaxespad=0.)
+#                     horizontalalignment='left', verticalalignment='top', fontsize=14, rotation=90)
         ax1.set_ylabel(I_units_phsbw, fontsize=18, color='black')
  
         if log_scale is True:
@@ -174,7 +175,7 @@ def plot_dfl_xz(dfl, whichis_derectrion='x', plot_proj=True, plot_slice=True, E_
             tl.set_visible(False)
         for tl in axHisty.get_yticklabels():
             tl.set_visible(False)
-            
+         
     plt.draw()
     if savefig != False:
         if savefig == True:
@@ -215,18 +216,19 @@ kwargs={'xlamds':(h_eV_s * speed_of_light / E_pohoton), #[m] - central wavelengt
 
 print('extracting wfr from files')
 #%%
-#wfrPathName='/home/andre/Documents/1_term_master_s/Sec_und_paper/code/fields/'
-#wfr1FileName = 'segmented_undulator.scr'
+wfrPathName='/home/andre/Documents/1_term_master_s/Sec_und_paper/code/fields/'
+wfr1FileName = 'segmented_undulator.scr'
 
-#afile = open(wfrPathName + wfr1FileName, 'rb')
-#wfr1   =  pickle.load(afile)
-#screen   =  pickle.load(afile)
-#afile.close()
-#dfl = screen2dfl(screen, polarization='x', current=0.4, gamma=3.0/m_e_GeV)
+afile = open(wfrPathName + wfr1FileName, 'rb')
+screen   =  pickle.load(afile)
+afile.close()
+dfl = screen2dfl(screen, polarization='x', current=0.4, gamma=3.0/m_e_GeV)
 
-dfl.filePath = '/home/andre/Desktop/'
-dfl = generate_gaussian_dfl(**kwargs)  #Gaussian beam defenition
-plot_dfl_xz(dfl, E_slice='max', savefig=True)
+dfl.filePath = '/home/andre/Documents/1_term_master_s/Sec_und_paper/tex/v0.8'
+#dfl = generate_gaussian_dfl(**kwargs)  #Gaussian beam defenitio
+#%%
+plot_dfl_xz(dfl, E_slice=5000, savefig=True, fig_name='spec_sec_far_no_ap.pdf')
+plt.savefig('/home/andre/Documents/1_term_master_s/Sec_und_paper/tex/v0.8/spec_sec_far_no_ap.pdf')
 
 
 

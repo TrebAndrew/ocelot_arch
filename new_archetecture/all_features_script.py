@@ -1,29 +1,27 @@
-import logging
-import time
 
+from numpy import random
+from numpy.linalg import norm
 import numpy as np
-from copy import deepcopy
-from numpy import inf, complex128, complex64
 from math import factorial
+from numpy import inf, complex128, complex64
+import scipy
+import numpy.fft as fft
+from copy import deepcopy
+import time
+import os
 
-import ocelot
+# from ocelot.optics.elements import *
 from ocelot.common.globals import *
-from ocelot import ocelog
+from ocelot.common.math_op import find_nearest_idx, fwhm, std_moment, bin_scale, bin_array, mut_coh_func
+from ocelot.common.py_func import filename_from_path
+# from ocelot.optics.utils import calc_ph_sp_dens
+# from ocelot.adaptors.genesis import *
+# import ocelot.adaptors.genesis as genesis_ad
+# GenesisOutput = genesis_ad.GenesisOutput
 from ocelot.common.ocelog import *
-_logger = logging.getLogger(__name__) 
+_logger = logging.getLogger(__name__)
 
-from ocelot.optics.wave import dfldomain_check, wigner_dfl, HeightProfile
-from ocelot.gui.dfl_plot import plot_dfl, plot_wigner, plot_dfl_waistscan
 import multiprocessing
-nthread = multiprocessing.cpu_count()
-
-try:
-    import pyfftw
-    fftw_avail = True
-except ImportError:
-    print("wave.py: module PYFFTW is not installed. Install it if you want speed up dfl wavefront calculations")
-    fftw_avail = False
-
 ### just must to be here for generating dfl :_)
 
 def generate_gaussian_dfl(xlamds=1e-9, shape=(51, 51, 100), dgrid=(1e-3, 1e-3, 50e-6), power_rms=(0.1e-3, 0.1e-3, 5e-6),
@@ -171,34 +169,40 @@ def generate_gaussian_dfl(xlamds=1e-9, shape=(51, 51, 100), dgrid=(1e-3, 1e-3, 5
 # here the new arch begins
 ### goes to new_wave.py ###
 class Grid:
+    """
+    Grid object defines spatial-frequency 3D mesh for Radiation Field class and Mask class    
+    :params (dx, dy, dz): spatial step of the mesh 
+    :param shape: number of point in each direction of 3D data mesh
+    :param xlamds: carrier wavelength of the wavepacket
+    :param used_aprox: the approximation used in solving the wave equation. OCELOT works in Slowly Varying Amplitude Approximation (SVAE)
+    """
     def __init__(self, shape=(0,0,0)):
         self.dx = []
         self.dy = []
         self.dz = []
         self.shape = shape
-        
         self.xlamds = None
         self.used_aprox = 'SVAE'
 
     def copy_grid(self, other, version=2):
-    if version == 1:
-        self.dx = other.dx
-        self.dy = other.dy
-        self.dz = other.dz
-        self.shape = other.shape
-        
-        self.xlamds = other.xlamds
-        self.used_aprox = other.used_aprox
-        
-    elif version == 2: #copy the same attributes of Mask and RadiationField objects
-        attr_list = np.intersect1d(dir(self),dir(other))
-        for attr in attr_list:
-            if attr.startswith('__') or callable(getattr(self, attr)):
-                continue
-            setattr(self, attr, getattr(other, attr))
-    else:
-        raise ValueError
-        
+        if version == 1:
+            self.dx = other.dx
+            self.dy = other.dy
+            self.dz = other.dz
+            self.shape = other.shape
+            
+            self.xlamds = other.xlamds
+            self.used_aprox = other.used_aprox
+            
+        elif version == 2: #copy the same attributes of Mask and RadiationField objects
+            attr_list = np.intersect1d(dir(self),dir(other))
+            for attr in attr_list:
+                if attr.startswith('__') or callable(getattr(self, attr)):
+                    continue
+                setattr(self, attr, getattr(other, attr))
+        else:
+            raise ValueError
+            
     def Lz(self):  
         '''
         full longitudinal mesh size
@@ -266,7 +270,7 @@ class Grid:
             raise ValueError
 
     def grid_z(self):
-        return self.scale_t() * speed_of_light
+        return self.grid_t() * speed_of_light
 
     def grid_kz(self):
         return self.grid_f() / speed_of_light
@@ -279,8 +283,10 @@ class RadiationField(Grid):
     def __init__(self, shape=(0,0,0)):
         super().__init__(shape=shape)
         self.fld = np.zeros(shape, dtype=complex128)  # (z,y,x)
-        self.xlamds = None  # carrier wavelength [m]
-        self.domain_z = 't'  # longitudinal domain (t - time, f - frequency)
+        self.xlamds = None    # carrier wavelength [m]
+        self.domain_z = 't'   # longitudinal domain (t - time, f - frequency)
+        self.domain_x = 's'   # transverse domain (s - space, k - inverse space)
+        self.domain_y = 's'   # transverse domain (s - space, k - inverse space)
         self.domain_xy = 's'  # transverse domain (s - space, k - inverse space)
         self.filePath = ''
                       
@@ -294,6 +300,9 @@ class RadiationField(Grid):
             self.dz = dfl1.dz
             self.xlamds = dfl1.xlamds
             self.domain_z = dfl1.domain_z
+            self.domain_x = dfl1.domain_x
+            self.domain_y = dfl1.domain_y
+
             self.domain_xy = dfl1.domain_xy
             self.filePath = dfl1.filePath
         elif version == 2: #does it link the address of these two objects only? : _) then exactly what we need for grid copying
@@ -379,34 +388,34 @@ class RadiationField(Grid):
 #   old scales for versions compatibility
 #   propper scales in meters or 2 pi / meters
     def scale_kx(self):  # scale in meters or meters**-1
-        if self.domain_xy == 's':  # space domain
-            return np.linspace(-self.Lx() / 2, self.Lx() / 2, self.Nx())
-        elif self.domain_xy == 'k':  # inverse space domain
-            k = 2 * np.pi / self.dx
-            return np.linspace(-k / 2, k / 2, self.Nx())
+        _logger.warning('"scale_kx" will be deprecated, use "grid_x and grid_kx" instead')
+        if 's' in [self.domain_xy, self.domain_x]:    # space domain
+            return self.grid_x()
+        elif 'k' in [self.domain_xy, self.domain_x]:  # inverse space domain
+            return self.grid_kx()
         else:
             raise AttributeError('Wrong domain_xy attribute')
 
     def scale_ky(self):  # scale in meters or meters**-1
-        if self.domain_xy == 's':  # space domain
-            return np.linspace(-self.Ly() / 2, self.Ly() / 2, self.Ny())
-        elif self.domain_xy == 'k':  # inverse space domain
-            k = 2 * np.pi / self.dy
-            return np.linspace(-k / 2, k / 2, self.Ny())
+        _logger.warning('"scale_ky" will be deprecated, use "grid_y and grid_ky" instead')
+        if 's' in [self.domain_xy, self.domain_y]:    # space domain
+            return self.grid_y()
+        elif 'k' in [self.domain_xy, self.domain_y]:  # inverse space domain
+            return self.grid_ky()
         else:
             raise AttributeError('Wrong domain_xy attribute')
-
+            
     def scale_kz(self):  # scale in meters or meters**-1
+        _logger.warning('"scale_kz" will be deprecated, use "grid_z and grid_kz" instead')        
         if self.domain_z == 't':  # time domain
-            return np.linspace(0, self.Lz(), self.Nz())
+            return self.grid_z()
         elif self.domain_z == 'f':  # frequency domain
-            dk = 2 * pi / self.Lz()
-            k = 2 * pi / self.xlamds
-            return np.linspace(k - dk / 2 * self.Nz(), k + dk / 2 * self.Nz(), self.Nz())
+            return self.grid_kz()
         else:
             raise AttributeError('Wrong domain_z attribute')
 
     def scale_x(self):  # scale in meters or radians
+        _logger.warning('"scale_x" will be deprecated, use "grid_x and grid_kx" instead')        
         if self.domain_xy == 's':  # space domain
             return self.scale_kx()
         elif self.domain_xy == 'k':  # inverse space domain
@@ -646,6 +655,7 @@ class RadiationField(Grid):
         
         if return_orig_domains:
             self.to_domain(domains)
+            
 
 class HeightProfile: # this one is here because generate_1d_profile is a method
     """
@@ -719,7 +729,43 @@ class HeightProfile: # this one is here because generate_1d_profile is a method
         np.random.seed()
         
         return height_profile
-       
+    
+def dfldomain_check(domains, both_req=False):
+    err = ValueError(
+        'domains should be a string with one or two letters from ("t" or "f") and ("s" or "k"), not {}'.format(
+            str(domains)))
+
+    # if type(domains) is not str:
+    #     raise err
+    if len(domains) < 1 or len(domains) > 2:
+        raise err
+    if len(domains) < 2 and both_req == True:
+        raise ValueError('please provide both domains, e.g. "ts" "fs" "tk" "fk"')
+
+    domains_avail = ['t', 'f', 's', 'k']
+    for letter in domains:
+        if letter not in domains_avail:
+            raise err
+
+    if len(domains) == 2:
+        D = [['t', 'f'], ['s', 'k']]
+        for d in D:
+            if domains[0] in d and domains[1] in d:
+                raise err
+
+        """
+        tranfers radiation to specified domains
+        *domains is a string with one or two letters: 
+            ("t" or "f") and ("s" or "k")
+        where 
+            't' (time); 'f' (frequency); 's' (space); 'k' (inverse space); 
+        e.g.
+            't'; 'f'; 's'; 'k'; 'ts'; 'fs'; 'tk'; 'fk'
+        order does not matter
+        
+        **kwargs are passed down to self.fft_z and self.fft_xy
+        """                
+
 ### goes to optics_line.py ### may be arrized and replaced by a line "from ocelot.rad.optics_line import *"
 
 flatten = lambda *n: (e for a in n
@@ -745,12 +791,18 @@ class OpticsLine():
             element.mesh = 0
 
 def get_transfer_function(element):
+    """
+    Matchs OpticalElement object to its mask. Several masks can correspond to one OpticalElement object 
+    The function rewrites OpticalElement object parameters to Mask object parameters
+    
+    :param element: OpticsElement class
+    """
     element.mask = Mask()
 
     if element.__class__ is None:
         raise ValueError('Optics element must belong to the OpticsElement class')
     
-    elif element.__class__ is ApertureRect:
+    elif element.__class__ is ApertureRect: #no cheked
         mask = ApertureRectMask()
         mask.lx = element.lx
         mask.ly = element.ly
@@ -758,26 +810,28 @@ def get_transfer_function(element):
         mask.cy = element.cy
         element.mask = mask
         
-    elif element.__class__ is ApertureEllips:
-        mask = ApertureEllipsMask()
+    elif element.__class__ is ApertureEllips: #no checked
+        mask = ApertureEllipsMask() #which way is better?
         mask.ax = element.ax
         mask.ay = element.ay
         mask.cx = element.cx
         mask.cy = element.cy
         element.mask = mask
       
-    elif element.__class__ is ThinLens:
+    elif element.__class__ is ThinLens: #no checked
         element.mask = LensMask(element.fx, element.fy)
   
-    elif element.__class__ is FreeSpace:
+    elif element.__class__ is FreeSpace: #no checked
         element.mask = DriftMask(element.l, element.mx, element.my)
 
-    elif element.__class__ is DispersiveSection:
+    elif element.__class__ is DispersiveSection: #no checked
         element.mask = PhaseDelayMask(element.coeff, element.E_ph0)
         
-    elif element.__class__ is ImperfectMirror:
+    elif element.__class__ is ImperfectMirror: #no checked
         element.mask = MirrorMask(element.height_profile, element.hrms, element.angle, element.plane, element.lx, element.ly)
 
+    else:
+        raise ValueError('Optics element must belong to one of the child OpticsElement classes')
 ### goes to propagation.py ### may be arrized and replaced by a line "from ocelot.rad.propagation import * "
 
 def propagate(optics_line, dfl, optimize=False, dump=False):
@@ -801,12 +855,12 @@ def combine_elements(optics_line):#not implemented
         
 class OpticsElement:
     """
-    write documentation
+    optics element parent class
+    :param eid: element id, (for example 'KB')  
     """
     def __init__(self, eid=None):
         self.eid = eid
-        self.domain = "sf"
-
+        
     def apply(self, dfl): #debag
         get_transfer_function(self)
         self.mask.apply(self.mask, dfl)
@@ -861,8 +915,12 @@ class ThinLens(OpticsElement):
         
 class FreeSpace(OpticsElement):
     """
-    Drift element
-    write documentation
+    Drift element class
+    :param OpticsElement(): optics element parent class with following parameters
+        :param eid: element id, (for example 'KB')  
+    :param l: propagation distance
+    :param mx: is the output x mesh size in terms of input mesh size (mx = Lx_out/Lx_inp)
+    :param my: is the output y mesh size in terms of input mesh size (my = Ly_out/Ly_inp)
     """
     def __init__(self, l=0., mx=1, my=1, eid=None):
         OpticsElement.__init__(self, eid=eid)
@@ -905,17 +963,40 @@ class ImperfectMirror(OpticsElement):
 ### goes to transfer_function.py ### may be arrized and replaced by a line "from ocelot.rad.transfer_function import * "
         
 class Mask(Grid):
-    
+    """
+    Mask element class
+    The class represents a transfer function of an optical element. Note, several masks can correspond to one optical element.
+    :param Grid: with following parameters  
+        :params (dx, dy, dz): spatial step of the mesh 
+        :param shape: number of point in each direction of 3D data mesh
+        :param xlamds: carrier wavelength of the wavepacket
+        :param used_aprox: the approximation used in solving the wave equation. OCELOT works in Slowly Varying Amplitude Approximation
+    :param domain_z: longitudinal domain (t - time, f - frequency)   
+    :param domain_x: transverse domain (s - space, k - inverse space)      
+    :param domain_y: transverse domain (s - space, k - inverse space)       
+    """
     def __init__(self, shape=(0, 0, 0)):
         Grid.__init__(self, shape=shape)
-
+        self.domain_z = 't'   # longitudinal domain (t - time, f - frequency)
+        self.domain_x = 's'   # transverse domain (s - space, k - inverse space)
+        self.domain_y = 's'   # transverse domain (s - space, k - inverse space)
+        
     def __mul__(self, other):
+        """
+        TODO
+        write documentation
+        """
         m = deepcopy(self)
         if other.__class__ in [self] and self.mask is not None and other.mask is not None:
             m.mask = self.mask * other.mask
             return m
+        else: ValueError("'other' must belong to Mask class") 
         
     def copy_grid(self, other, version=2):
+        """
+        TODO
+        write documentation
+        """
         if version == 1:
             self.dx = other.dx
             self.dy = other.dy
@@ -923,8 +1004,7 @@ class Mask(Grid):
             self.shape = other.shape
             
             self.xlamds = other.xlamds
-            self.used_aprox = other.used_aprox
-            
+            self.used_aprox = other.used_aprox       
         elif version == 2: #copy the same attributes of Mask and RadiationField objects
             attr_list = np.intersect1d(dir(self),dir(other))
             for attr in attr_list:
@@ -1336,9 +1416,7 @@ class Prop_mMask(Mask):
     
 class DriftMask(Mask):
     """
-    TODO
-    write documentation
-    add logging
+    Delete this excessive class
     """
     def __init__(self, z0, mx, my):
         Mask.__init__(self)
@@ -1349,8 +1427,8 @@ class DriftMask(Mask):
         self.type = 'PropMask'  #type of propagation, also may be 
         # 'Fraunhofer_Propagator'
         # 'Fresnel_Propagator' . . .
-    def apply(self, dfl): 
-        
+
+    def apply(self, dfl):         
         if self.mask is None:         
             if self.type == 'PropMask' and self.mx == 1 and self.my == 1:
                 dfl = PropMask(z0 = self.z0).apply(dfl)
@@ -1603,7 +1681,7 @@ class HeightErrorMask_1D(Mask):
     
 #%%    
 ### script itself ###
-'''
+
 #optics elements check
 dfl = RadiationField()
 E_pohoton = 1239.8#200 #central photon energy [eV]
@@ -1623,6 +1701,16 @@ kwargs={'xlamds':(h_eV_s * speed_of_light / E_pohoton), #[m] - central wavelengt
         }
 
 dfl = generate_gaussian_dfl(**kwargs);  #Gaussian beam defenition
+
+d = FreeSpace(l=200)
+line = (d)
+lat = OpticsLine(line)
+
+dfl = propagate(lat, dfl)
+plot_dfl(dfl, fig_name='after1', phase=1)
+
+
+'''
 #dfl = generate_gaussian_dfl(1239.8/500*1e-9, shape=(3,3,501), dgrid=(1e-3,1e-3,400e-6), power_rms=(0.5e-3,0.5e-3,0.5e-6), 
 #                        power_center=(0,0,None), power_angle=(0,0), power_waistpos=(0,0), #wavelength=[4.20e-9,4.08e-9], 
 #                        zsep=None, freq_chirp=0, energy=None, power=10e6, debug=1)
