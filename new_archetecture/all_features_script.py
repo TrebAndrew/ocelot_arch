@@ -186,7 +186,8 @@ class Grid:
     :params (dx, dy, dz): spatial step of the mesh 
     :param shape: number of point in each direction of 3D data mesh
     :param xlamds: carrier wavelength of the wavepacket
-    :param used_aprox: the approximation used in solving the wave equation. OCELOT works in Slowly Varying Amplitude Approximation (SVAE)
+    :param used_aprox: the approximation used in solving the wave equation. 
+    OCELOT works in Slowly Varying Amplitude Approximation (SVAA)
     """
     def __init__(self, shape=(0,0,0)):
         self.dx = []
@@ -194,9 +195,13 @@ class Grid:
         self.dz = []
         self.shape = shape
         self.xlamds = None
-        self.used_aprox = 'SVAE'
+        self.used_aprox = 'SVAA'
 
     def copy_grid(self, other, version=2):
+        """
+        TODO
+        write documentation
+        """
         if version == 1:
             self.dx = other.dx
             self.dy = other.dy
@@ -206,7 +211,8 @@ class Grid:
             self.xlamds = other.xlamds
             self.used_aprox = other.used_aprox
             
-        elif version == 2: #copy the same attributes of Mask and RadiationField objects
+        elif version == 2: #I(Andrei) had an idea of setting attributes with the same memory
+# address for Mask and RadiationField objects, to synchronize these object attributes "automatically"
             attr_list = np.intersect1d(dir(self),dir(other))
             for attr in attr_list:
                 if attr.startswith('__') or callable(getattr(self, attr)):
@@ -1066,26 +1072,7 @@ def get_transfer_function(element):
 
     if element.__class__ is None:
         raise ValueError('Optics element must belong to the OpticsElement class')
-    
-    elif element.__class__ is ApertureRect: #no cheked
-        mask = ApertureRectMask()
-        mask.lx = element.lx
-        mask.ly = element.ly
-        mask.cx = element.cx
-        mask.cy = element.cy
-        element.mask = mask
-        
-    elif element.__class__ is ApertureEllips: #no checked
-        mask = ApertureEllipsMask() #which way is better?
-        mask.ax = element.ax
-        mask.ay = element.ay
-        mask.cx = element.cx
-        mask.cy = element.cy
-        element.mask = mask
-      
-    elif element.__class__ is ThinLens: #no checked
-        element.mask = LensMask(element.fx, element.fy)
-  
+
     elif element.__class__ is FreeSpace: #implementation of several masks
         if element.method in ['PropMask', 'PropMask_kf', 'PropMask_kt']:
             if element.mx == 1 and element.my == 1:
@@ -1102,7 +1089,26 @@ def get_transfer_function(element):
             pass                               
         else:            
             raise ValueError('Propagator method can be PropMask (see Tutorials), Fraunhofer_Propagator or Fresnel_Propagator')    
-    
+        
+    elif element.__class__ is ThinLens: 
+        element.mask = LensMask(element.fx, element.fy)
+  
+    elif element.__class__ is ApertureRect: #no cheked
+        mask = ApertureRectMask()
+        mask.lx = element.lx
+        mask.ly = element.ly
+        mask.cx = element.cx
+        mask.cy = element.cy
+        element.mask = mask
+        
+    elif element.__class__ is ApertureEllips: #no checked
+        mask = ApertureEllipsMask() #which way is better?
+        mask.ax = element.ax
+        mask.ay = element.ay
+        mask.cx = element.cx
+        mask.cy = element.cy
+        element.mask = mask
+      
     elif element.__class__ is DispersiveSection: #no checked
         element.mask = PhaseDelayMask(element.coeff, element.E_ph0)
         
@@ -1134,17 +1140,51 @@ def combine_elements(optics_line):#not implemented
         
 class OpticsElement:
     """
-    optics element parent class
+    Parent class Optics element
     :param eid: element id, (for example 'KB')  
     """
     def __init__(self, eid=None):
         self.eid = eid
-#        self.mask = None
         
-    def apply(self, dfl): #debag
+    def apply(self, dfl): #is this method need?
+        """
+        TODO
+        write documentation
+        """
         get_transfer_function(self)
         self.mask.apply(self.mask, dfl)
            
+class FreeSpace(OpticsElement):
+    """
+    Class for Drift element 
+    :param OpticsElement(): optics element parent class with following parameters
+        :param eid: element id, (for example 'KB')  
+    :param l: propagation distance
+    :param mx: is the output x mesh size in terms of input mesh size (mx = Lx_out/Lx_inp)
+    :param my: is the output y mesh size in terms of input mesh size (my = Ly_out/Ly_inp)
+    """
+    def __init__(self, l=0., mx=1, my=1, method='PropMask_kf', eid=None):
+        OpticsElement.__init__(self, eid=eid)
+        self.l = l
+        self.mx = mx
+        self.my = my
+        self.method = method  #method of propagation, also may be 
+                                # 'Fraunhofer_Propagator'
+                                # 'Fresnel_Propagator' . . .
+
+class ThinLens(OpticsElement):
+    """
+    Class for Lens element
+    :param OpticsElement(): optics element parent class with following parameters
+        :param eid: element id, (for example 'KB') 
+    :param fx: focus length in x direction
+    :param fy: focus length in y direction
+    """
+    def __init__(self, fx=np.inf, fy=np.inf, eid=None):
+        OpticsElement.__init__(self, eid=eid)
+        self.fx = fx
+        self.fy = fy
+        
 class Aperture(OpticsElement):
     """
     Aperture
@@ -1183,34 +1223,8 @@ class ApertureEllips(Aperture):
         self.ay = ay
         self.cx = cx
         self.cy = cy
-        
-class ThinLens(OpticsElement):
-    """
-    Lens element
-    """
-    def __init__(self, fx=np.inf, fy=np.inf, eid=None):
-        OpticsElement.__init__(self, eid=eid)
-        self.fx = fx
-        self.fy = fy
-        
-class FreeSpace(OpticsElement):
-    """
-    Drift element class
-    :param OpticsElement(): optics element parent class with following parameters
-        :param eid: element id, (for example 'KB')  
-    :param l: propagation distance
-    :param mx: is the output x mesh size in terms of input mesh size (mx = Lx_out/Lx_inp)
-    :param my: is the output y mesh size in terms of input mesh size (my = Ly_out/Ly_inp)
-    """
-    def __init__(self, l=0., mx=1, my=1, method='PropMask_kf', eid=None):
-        OpticsElement.__init__(self, eid=eid)
-        self.l = l
-        self.mx = mx
-        self.my = my
-        self.method = method  #method of propagation, also may be 
-                                # 'Fraunhofer_Propagator'
-                                # 'Fresnel_Propagator' . . .
-       
+             
+      
 class DispersiveSection(OpticsElement):
     """
     Dispersive Section
@@ -1264,38 +1278,321 @@ class Mask(Grid):
         self.domain_x = 's'   # transverse domain (s - space, k - inverse space)
         self.domain_y = 's'   # transverse domain (s - space, k - inverse space)
         
-    def __mul__(self, other):
+    def __mul__(self, other):#check this stuff when it will been needed
         """
-        TODO
-        write documentation
+        Multiplication operator for two masks 
         """
         m = deepcopy(self)
         if other.__class__ in [self] and self.mask is not None and other.mask is not None:
             m.mask = self.mask * other.mask
             return m
         else: ValueError("'other' must belong to Mask class") 
+
+class PropMask(Mask):
+    """
+    Angular-spectrum propagation for fieldfile
+    
+    can handle wide spectrum
+      (every slice in freq.domain is propagated
+       according to its frequency)
+    no kx**2+ky**2<<k0**2 limitation
+    
+    dfl is the RadiationField() object
+    
+    z0 is the propagation distance in [m]
+    for 'kt' domain propagation
+        no Fourier transform to frequency domain is done
+        assumes no angular dispersion (true for plain FEL radiation)
+        assumes narrow spectrum at center of xlamds (true for plain FEL radiation)
+    'kf' propagation is a default option
+    
+    z>0 -> forward direction
+    z<0 -> backward direction
+    z=0 return original
+    """   
+    def __init__(self, z0, method='PropMask_kf'):
+        Mask.__init__(self)
+        self.z0 = z0 
+        self.method = method
+        self.mask = None
+
+    def apply(self, dfl):
+        """
+        'apply' method for PropMask class 
         
-    def copy_grid(self, other, version=2):
+        transform dfl to the domain of the propagation 'kf' or 'kt'
+        get the transfer function calling 'get_mask' method, e.g. get H transfer function 
+        multiply dfl and the mask, e.g. E = E_0 * H convolution in inverse space domain
+        return the field to the original domain
         """
-        TODO
-        write documentation
-        """
-        if version == 1:
-            self.dx = other.dx
-            self.dy = other.dy
-            self.dz = other.dz
-            self.shape = other.shape
-            
-            self.xlamds = other.xlamds
-            self.used_aprox = other.used_aprox       
-        elif version == 2: #copy the same attributes of Mask and RadiationField objects
-            attr_list = np.intersect1d(dir(self),dir(other))
-            for attr in attr_list:
-                if attr.startswith('__') or callable(getattr(self, attr)):
-                    continue
-                setattr(self, attr, getattr(other, attr))
+        
+        _logger.info('propagating dfl file by %.2f meters' % (self.z0))
+        
+        if self.z0 == 0:
+            _logger.debug(ind_str + 'z0=0, returning original')
+            return dfl
+
+        start = time.time()
+
+        domains = dfl.domains()
+        self.domain_x = 'k'
+        self.domain_y = 'k'
+        if self.method in ['PropMask', 'PropMask_kf']:
+            dfl.to_domain('kf')
+            self.domain_x = 'f'
+        elif self.method == 'PropMask_kt':
+            dfl.to_domain('kt')
+            self.domain_x = 't'
         else:
-            raise ValueError
+            raise ValueError("propagation method should be 'PropMask', 'PropMask_kf' or 'PropMask_kt'")
+                         
+        if self.mask is None:
+            self.get_mask(dfl) # get H transfer function 
+
+        dfl.fld *= self.mask # E = E_0 * H convolution in inverse space domain
+        
+        dfl.to_domain(domains) # back to original domain  
+
+        t_func = time.time() - start
+        _logger.debug(ind_str + 'done in %.2f sec' % t_func)
+        
+        return dfl
+        
+    def get_mask(self, dfl):
+        """
+        'get_mask' method for PropMask class
+        find the transfer function for propagation in 'kf' of 'ks' domains
+        H = exp(iz0(k^2 - kx^2 - ky^2)^(1/2) - k) 
+        """
+        self.copy_grid(dfl)
+       
+        k_x, k_y = np.meshgrid(self.grid_kx(), self.grid_ky())
+        
+        if dfl.domain_z == 'f':
+            k = self.grid_kz()
+            self.mask = [np.exp(1j * self.z0 * (np.sqrt(k[i] ** 2 - k_x ** 2 - k_y ** 2) - k[i])) for i in range(dfl.Nz())] 
+        elif dfl.domain_z == 't':
+            k = 2 * np.pi / self.xlamds
+            self.mask = [np.exp(1j * self.z0 * (np.sqrt(k ** 2 - k_x ** 2 - k_y ** 2) - k)) for i in range(dfl.Nz())]
+        else: 
+            raise ValueError('wrong field domain, domain must be ks or kf ')    
+            
+        return self.mask
+
+class Prop_mMask(Mask):
+    """
+    Angular-spectrum propagation for fieldfile
+    
+    can handle wide spectrum
+      (every slice in freq.domain is propagated
+       according to its frequency)
+    no kx**2+ky**2<<k0**2 limitation
+    
+    dfl is the RadiationField() object
+    
+    z0 is the propagation distance in [m]
+    m is the output mesh size in terms of input mesh size (m = L_out/L_inp)
+    for 'ks' domain propagation
+        no Fourier transform to frequency domain is done
+        assumes no angular dispersion (true for plain FEL radiation)
+        assumes narrow spectrum at center of xlamds (true for plain FEL radiation)
+    'kf' propagation is a default option
+    
+    z>0 -> forward direction
+    z<0 -> backward direction
+    z=0 return original
+    """   
+    def __init__(self, z0, mx, my, method):
+        Mask.__init__(self)
+        self.z0 = z0
+        self.mx = mx
+        self.my = my
+        self.method = method
+        self.mask = None
+
+    def apply(self, dfl):
+        """
+        'apply' method for Prop_mMask class 
+        
+        transform dfl to the domain of the propagation 'kf' or 'kt'
+        transforming the wavefront curvature transform by a phase factor z0/(1 - m)
+        get the transfer function calling 'get_mask' method, e.g. get H transfer function 
+        multiply dfl and the mask, e.g. E = E_0 * H convolution in inverse space domain
+        transverce mesh step resizing 
+        return the field to the original domain
+        transforming the wavefront curvature transform by a phase factor -m*z0/(m - 1) --- inverse transformation
+        """   
+        _logger.info('propagating dfl file by %.2f meters' % (self.z0))
+
+        if self.z0 == 0:
+            _logger.debug(ind_str + 'z0=0, returning original')
+            return dfl
+        
+        start = time.time()
+    
+        if self.mx != 1:
+#            dfl.curve_wavefront(-self.z0 / (1 - self.mx), plane='x')
+            dfl = QuadCurvMask(r = -self.z0 / (1 - self.mx), plane='x').apply(dfl)
+        if self.my != 1:
+#            dfl.curve_wavefront(-self.z0 / (1 - self.my), plane='y')
+            dfl = QuadCurvMask(r = -self.z0 / (1 - self.my), plane='y').apply(dfl)
+
+        domains = dfl.domains()      
+        self.domain_x = 'k'
+        self.domain_y = 'k'
+        if self.method in ['PropMask', 'PropMask_kf']:
+            dfl.to_domain('kf')
+            self.domain_x = 'f'
+        elif self.method == 'PropMask_kt':
+            dfl.to_domain('kt')
+            self.domain_x = 't'
+        else:
+            raise ValueError("propagation method should be 'PropMask', 'PropMask_kf' or 'PropMask_kt'")
+        
+        if self.mask is None:
+            self.get_mask(dfl) # get H transfer function 
+            
+        dfl.fld *= self.mask #E = E_0 * H convolution in inverse space domain
+               
+        dfl.dx *= self.mx #transform grid to output mesh size
+        dfl.dy *= self.my        
+        self.dx *= self.mx #transform grid to output mesh size
+        self.dy *= self.my   
+        
+        print(id(dfl.dx), id(self.dx))
+        
+        dfl.to_domain(domains) # back to the original domain
+        
+        if self.mx != 1:
+#            dfl.curve_wavefront(-self.mx * self.z0 / (self.mx - 1), plane='x')
+            dfl = QuadCurvMask(r = -self.mx * self.z0 / (self.mx - 1), plane='x').apply(dfl)
+            print('aaaa')
+        if self.my != 1:
+#            dfl.curve_wavefront(-self.my * self.z0 / (self.my - 1), plane='y')
+            dfl = QuadCurvMask(r = -self.my * self.z0 / (self.my - 1), plane='y').apply(dfl)
+
+        t_func = time.time() - start
+        _logger.debug(ind_str + 'done in %.2f sec' % t_func)
+        
+        return dfl
+    
+    def get_mask(self, dfl):
+        """
+        'get_mask' method for Prop_mMask class
+        find the transfer function for propagation in 'kf' of 'ks' domains
+        H = exp(iz0(k^2 - kx^2 - ky^2)^(1/2) - k) 
+        """
+        self.copy_grid(dfl)
+        
+        k_x, k_y = np.meshgrid(self.grid_kx(), self.grid_ky())
+        if dfl.domain_z == 'f':
+            self.mask = np.ones(dfl.shape, dtype=complex128)
+            k = self.grid_kz()
+            if self.mx != 0:
+#                self.mask[i,:,:] *= [np.exp(1j * self.z0/self.mx * (np.sqrt(k[i] ** 2 - k_x ** 2) - k[i])) for i in range(dfl.Nz())] #Hx = exp(iz0/mx(k^2 - kx^2)^(1/2) - k)
+                for i in range(self.Nz()):
+                    self.mask[i,:,:] *= np.exp(1j * self.z0 / self.mx * (np.sqrt(k[i] ** 2 - k_x ** 2) - k[i]))
+            if self.my != 0:
+#                self.mask[i,:,:] *= [np.exp(1j * self.z0/self.my * (np.sqrt(k[i] ** 2 - k_y ** 2) - k[i])) for i in range(dfl.Nz())] #Hy = exp(iz0/my(k^2 - ky^2)^(1/2) - k)                   
+                for i in range(self.Nz()):
+                    self.mask[i,:,:] *= np.exp(1j * self.z0 / self.my * (np.sqrt(k[i] ** 2 - k_y ** 2) - k[i]))
+        elif dfl.domain_z == 't':
+            k = 2 * np.pi / self.xlamds
+            Hx = [np.exp(1j * self.z0/self.mx * (np.sqrt(k ** 2 - k_x ** 2) - k)) for i in range(dfl.Nz())] 
+            Hy = [np.exp(1j * self.z0/self.my * (np.sqrt(k ** 2 - k_y ** 2) - k)) for i in range(dfl.Nz())]          
+            self.mask = Hx*Hy
+        else: 
+            raise ValueError("wrong field domain, domain must be 'ks' or 'kf'")    
+            
+        return self.mask    
+    
+class QuadCurvMask(Mask):
+    """
+    Quadratic curvature wavefront mask
+    add quadratic x and y term in 's' space 
+    
+    :param r: radius of curveture
+    :param plane: plane in which the curvature added
+    :param mask: the transfer function itself
+    """
+    def __init__(self, r, plane):
+        Mask.__init__(self)
+        self.r = r #is the radius of curvature
+        self.plane = plane #is the plane in which the curvature is applied
+        self.mask = None #is the transfer function itself
+
+    def apply(self, dfl):
+        """
+        TODO 
+        add documentation
+        """
+        domains = dfl.domain_z, dfl.domain_xy
+        
+        self.domain_x = 's'
+        self.domain_y = 's'
+        if self.domain_z is None:
+            self.domain_z = dfl.domain_z
+        
+        _logger.debug('curving radiation wavefront by {}m in {} domain'.format(self.r, self.domain_z))
+        
+        if np.size(self.r) == 1:
+            if self.r == 0:
+                raise ValueError('radius of curvature cannot be zero')
+            elif self.r == np.inf:
+                _logger.debug(ind_str + 'radius of curvature is infinite, skipping')
+                return
+            else:
+                pass
+            
+        if self.mask is None:
+            self.get_mask(dfl) 
+    
+        dfl.to_domain(self.domain_z + 's') #the field must be in 's' domain
+        dfl.fld *= self.mask 
+        dfl.to_domain(domains) #return to the original domain
+
+        return dfl
+    
+    def get_mask(self, dfl):
+        """
+        TODO 
+        add documentation
+        """        
+        self.copy_grid(dfl)
+       
+        x, y = np.meshgrid(self.grid_x(), self.grid_y())
+        if self.plane == 'xy' or self.plane == 'yx':
+            arg2 = x ** 2 + y ** 2
+        elif self.plane == 'x':
+            arg2 = x ** 2
+        elif self.plane == 'y':
+            arg2 = y ** 2
+        else:
+            raise ValueError("'plane' should be in 'x', 'y'")
+
+        if self.domain_z == 'f':
+            k = 2 * np.pi /dfl.grid_z() 
+
+            if np.size(self.r) == 1:
+                self.mask = np.exp(-1j * k[:, np.newaxis, np.newaxis] / 2 * arg2[np.newaxis, :, :] / self.r) #H = exp(-i * k / 2 * (x^2 + y^2))
+            elif np.size(self.r) == dfl.Nz():
+                self.mask = np.exp(-1j * k[:, np.newaxis, np.newaxis] / 2 * arg2[np.newaxis, :, :] / self.r[:, np.newaxis, np.newaxis])
+            else:
+                raise ValueError('wrong dimensions of radius of curvature')    
+
+        elif self.domain_z == 't':
+            k = 2 * np.pi / dfl.xlamds
+
+            if np.size(self.r) == 1:
+                self.mask = np.exp(-1j * k / 2 * arg2 / self.r)
+            elif np.size(self.r) == dfl.Nz():
+                self.mask = np.exp(-1j * k / 2 * arg2[np.newaxis, :, :] / self.r[:, np.newaxis, np.newaxis])
+            else:
+                raise ValueError('wrong dimensions of radius of curvature')
+        else:
+            raise ValueError("domain_z should be in 'f', 't'")
+            
+        return self.mask
 
 class ApertureRectMask(Mask):
     """
@@ -1449,285 +1746,10 @@ class LensMask(Mask):
       
         return self.mask
 
-class QuadCurvMask(Mask):
-    """
-    TODO
-    write documentation
-    add logging
-    """
-    def __init__(self, r, plane):
-        Mask.__init__(self)
-        self.r = r #is the radius of curvature
-        self.plane = plane #is the plane in which the curvature is applied
-        self.mask = None #is the transfer function itself
-        self.domains = 's' #is the domain in which the transfer function is calculated
-        self.domain_z = None #is the domain in which wavefront curvature is introduced 
 
-    def apply(self, dfl):
-        
-        domains = dfl.domain_z, dfl.domain_xy
-
-        if self.domain_z is None:
-            self.domain_z = dfl.domain_z
-        
-        _logger.debug('curving radiation wavefront by {}m in {} domain'.format(self.r, self.domain_z))
-        
-        if np.size(self.r) == 1:
-            if self.r == 0:
-                raise ValueError('radius of curvature should not be zero')
-            elif self.r == np.inf:
-                _logger.debug(ind_str + 'radius of curvature is infinite, skipping')
-                return
-            else:
-                pass
-            
-        if self.mask is None:
-            self.get_mask(dfl) 
     
-        dfl.to_domain(self.domain_z + 's') #the field must be in 's' domain
-        dfl.fld *= self.mask 
-        dfl.to_domain(domains) #return to the original domain
-
-        return dfl
-    
-    def get_mask(self, dfl):
-        self.copy_grid(dfl)
        
-        x, y = np.meshgrid(self.grid_x(), self.grid_y())
-        if self.plane == 'xy' or self.plane == 'yx':
-            arg2 = x ** 2 + y ** 2
-        elif self.plane == 'x':
-            arg2 = x ** 2
-        elif self.plane == 'y':
-            arg2 = y ** 2
-        else:
-            raise ValueError('"plane" should be in ["x", "y"]')
 
-        if self.domain_z == 'f':
-            k = 2 * np.pi /dfl.scale_z() # <- change on somethenin' more reliable
-
-            if np.size(self.r) == 1:
-                self.mask = np.exp(-1j * k[:, np.newaxis, np.newaxis] / 2 * arg2[np.newaxis, :, :] / self.r) #H = exp(-i * k / 2 * (x^2 + y^2))
-            elif np.size(self.r) == dfl.Nz():
-                self.mask = np.exp(-1j * k[:, np.newaxis, np.newaxis] / 2 * arg2[np.newaxis, :, :] / self.r[:, np.newaxis, np.newaxis])
-            else:
-                raise ValueError('wrong dimensions of radius of curvature')    
-
-        elif self.domain_z == 't':
-            k = 2 * np.pi / dfl.xlamds
-
-            if np.size(self.r) == 1:
-                self.mask = np.exp(-1j * k / 2 * arg2 / self.r)
-            elif np.size(self.r) == dfl.Nz():
-                self.mask = np.exp(-1j * k / 2 * arg2[np.newaxis, :, :] / self.r[:, np.newaxis, np.newaxis])
-            else:
-                raise ValueError('wrong dimensions of radius of curvature')
-        else:
-            raise ValueError('domain_z should be in ["f", "t", None]')
-            
-        return self.mask
-    
-class PropMask(Mask):
-    """
-    Angular-spectrum propagation for fieldfile
-    
-    can handle wide spectrum
-      (every slice in freq.domain is propagated
-       according to its frequency)
-    no kx**2+ky**2<<k0**2 limitation
-    
-    dfl is the RadiationField() object
-    
-    z0 is the propagation distance in [m]
-    for 'kt' domain propagation
-        no Fourier transform to frequency domain is done
-        assumes no angular dispersion (true for plain FEL radiation)
-        assumes narrow spectrum at center of xlamds (true for plain FEL radiation)
-    'kf' propagation is a default option
-    
-    z>0 -> forward direction
-    z<0 -> backward direction
-    z=0 return original
-    """   
-    def __init__(self, z0, method='PropMask_kf'):
-        Mask.__init__(self)
-        self.z0 = z0 
-        self.method = method
-        self.mask = None
-
-    def apply(self, dfl):
-        """
-        'apply' method for PropMask class 
-        
-        transform dfl to the domain of the propagation 'kf' or 'kt'
-        get the transfer function calling 'get_mask' method, e.g. get H transfer function 
-        multiply dfl and the mask, e.g. E = E_0 * H convolution in inverse space domain
-        return the field to the original domain
-        """
-        
-        _logger.info('propagating dfl file by %.2f meters' % (self.z0))
-        
-        if self.z0 == 0:
-            _logger.debug(ind_str + 'z0=0, returning original')
-            return dfl
-
-        start = time.time()
-
-        domains = dfl.domains()
-        self.domain_x = 'k'
-        self.domain_y = 'k'
-        if self.method in ['PropMask', 'PropMask_kf']:
-            dfl.to_domain('kf')
-            self.domain_x = 'f'
-        elif self.method == 'PropMask_kt':
-            dfl.to_domain('kt')
-            self.domain_x = 't'
-        else:
-            raise ValueError("propagation method should be 'PropMask', 'PropMask_kf' or 'PropMask_kt'")
-                         
-        if self.mask is None:
-            self.get_mask(dfl) # get H transfer function 
-
-        dfl.fld *= self.mask # E = E_0 * H convolution in inverse space domain
-        
-        dfl.to_domain(domains) # back to original domain  
-
-        t_func = time.time() - start
-        _logger.debug(ind_str + 'done in %.2f sec' % t_func)
-        
-        return dfl
-        
-    def get_mask(self, dfl):
-        """
-        'get_mask' method for PropMask class
-        find the transfer function for propagation in 'kf' of 'ks' domains
-        H = exp(iz0(k^2 - kx^2 - ky^2)^(1/2) - k)
-        """
-        self.copy_grid(dfl)
-       
-        k_x, k_y = np.meshgrid(self.grid_kx(), self.grid_ky())
-        
-        if dfl.domain_z == 'f':
-            k = self.grid_kz()
-            self.mask = [np.exp(1j * self.z0 * (np.sqrt(k[i] ** 2 - k_x ** 2 - k_y ** 2) - k[i])) for i in range(dfl.Nz())] 
-        elif dfl.domain_z == 't':
-            k = 2 * np.pi / self.xlamds
-            self.mask = [np.exp(1j * self.z0 * (np.sqrt(k ** 2 - k_x ** 2 - k_y ** 2) - k)) for i in range(dfl.Nz())]
-        else: 
-            raise ValueError('wrong field domain, domain must be ks or kf ')    
-            
-        return self.mask
-
-class Prop_mMask(Mask):
-    """
-    Angular-spectrum propagation for fieldfile
-    
-    can handle wide spectrum
-      (every slice in freq.domain is propagated
-       according to its frequency)
-    no kx**2+ky**2<<k0**2 limitation
-    
-    dfl is the RadiationField() object
-    
-    z0 is the propagation distance in [m]
-    m is the output mesh size in terms of input mesh size (m = L_out/L_inp)
-    for 'ks' domain propagation
-        no Fourier transform to frequency domain is done
-        assumes no angular dispersion (true for plain FEL radiation)
-        assumes narrow spectrum at center of xlamds (true for plain FEL radiation)
-    'kf' propagation is a default option
-    
-    z>0 -> forward direction
-    z<0 -> backward direction
-    z=0 return original
-    """   
-    def __init__(self, z0, mx, my, method):
-        Mask.__init__(self)
-        self.z0 = z0
-        self.mx = mx
-        self.my = my
-        self.method = method
-        self.mask = None
-
-
-    def apply(self, dfl):
-        
-        _logger.info('propagating dfl file by %.2f meters' % (self.z0))
-
-        if self.z0 == 0:
-            _logger.debug(ind_str + 'z0=0, returning original')
-            return dfl
-        
-        start = time.time()
-    
-        if self.mx != 1:
-            dfl.curve_wavefront(-self.z0 / (1 - self.mx), plane='x')
-#            dfl = QuadCurvMask(r = -self.z0 / (1 - self.mx), plane='x').apply(dfl)
-        if self.my != 1:
-            dfl.curve_wavefront(-self.z0 / (1 - self.my), plane='y')
-#            dfl = QuadCurvMask(r = -self.z0 / (1 - self.my), plane='y').apply(dfl)
-
-        domains = dfl.domains()      
-        self.domain_x = 'k'
-        self.domain_y = 'k'
-        if self.method in ['PropMask', 'PropMask_kf']:
-            dfl.to_domain('kf')
-            self.domain_x = 'f'
-        elif self.method == 'PropMask_kt':
-            dfl.to_domain('kt')
-            self.domain_x = 't'
-        else:
-            raise ValueError("propagation method should be 'PropMask', 'PropMask_kf' or 'PropMask_kt'")
-        
-        if self.mask is None:
-            self.get_mask(dfl) # get H transfer function 
-            
-        dfl.fld *= self.mask #E = E_0 * H convolution in inverse space domain
-               
-        dfl.dx *= self.mx #transform grid to output mesh size
-        dfl.dy *= self.my        
-        self.dx *= self.mx #transform grid to output mesh size
-        self.dy *= self.my   
-        
-        dfl.to_domain(domains) # back to original domain
-        
-        if self.mx != 1:
-            dfl.curve_wavefront(-self.mx * self.z0 / (self.mx - 1), plane='x')
-#            dfl = QuadCurvMask(r = -self.mx * self.z0 / (self.mx - 1), plane='x').apply(dfl)
-        if self.my != 1:
-            dfl.curve_wavefront(-self.my * self.z0 / (self.my - 1), plane='y')
-#            dfl = QuadCurvMask(r = -self.my * self.z0 / (self.my - 1), plane='y').apply(dfl)
-
-        t_func = time.time() - start
-        _logger.debug(ind_str + 'done in %.2f sec' % t_func)
-        
-        return dfl
-        
-    def get_mask(self, dfl):
-        
-        self.copy_grid(dfl)
-        
-        k_x, k_y = np.meshgrid(self.grid_kx(), self.grid_ky())
-        if dfl.domain_z == 'f':
-            self.mask = np.ones(dfl.shape, dtype=complex128)
-            k = self.grid_kz()
-            if self.mx != 0:
-#                self.mask[i,:,:] *= [np.exp(1j * self.z0/self.mx * (np.sqrt(k[i] ** 2 - k_x ** 2) - k[i])) for i in range(dfl.Nz())] #Hx = exp(iz0/mx(k^2 - kx^2)^(1/2) - k)
-                for i in range(self.Nz()):
-                    self.mask[i,:,:] *= np.exp(1j * self.z0 / self.mx * (np.sqrt(k[i] ** 2 - k_x ** 2) - k[i]))
-            if self.my != 0:
-#                self.mask[i,:,:] *= [np.exp(1j * self.z0/self.my * (np.sqrt(k[i] ** 2 - k_y ** 2) - k[i])) for i in range(dfl.Nz())] #Hy = exp(iz0/my(k^2 - ky^2)^(1/2) - k)                   
-                for i in range(self.Nz()):
-                    self.mask[i,:,:] *= np.exp(1j * self.z0 / self.my * (np.sqrt(k[i] ** 2 - k_y ** 2) - k[i]))
-        elif dfl.domain_z == 't':
-            k = 2 * np.pi / self.xlamds
-            Hx = [np.exp(1j * self.z0/self.mx * (np.sqrt(k ** 2 - k_x ** 2) - k)) for i in range(dfl.Nz())] 
-            Hy = [np.exp(1j * self.z0/self.my * (np.sqrt(k ** 2 - k_y ** 2) - k)) for i in range(dfl.Nz())]          
-            self.mask = Hx*Hy
-        else: 
-            raise ValueError('wrong field domain, domain must be ks or kf ')    
-            
-        return self.mask
       
 class PhaseDelayMask(Mask):
     """
@@ -1961,11 +1983,23 @@ kwargs={'xlamds':(h_eV_s * speed_of_light / E_pohoton), #[m] - central wavelengt
         'power':1e6,
         }
 dfl = generate_gaussian_dfl(**kwargs);
-
-
 dfl1 = generate_gaussian_dfl(**kwargs);  #Gaussian beam defenition
 dfl2 = generate_gaussian_dfl(**kwargs);  #Gaussian beam defenition
 
+#%%
+###lens checking
+f=100
+lens = ThinLens(fx=f, fy=f)
+line1 = (lens)
+lat1 = OpticsLine(line1)
+dfl = propagate(lat1, dfl)
+
+dfl1.curve_wavefront(r=f)
+
+plot_dfl(dfl, fig_name='after3', phase=1)
+plot_dfl(dfl1, fig_name='after4', phase=1)
+#%%
+#PropMask and Prop_mMask cheking
 #plot_dfl(dfl1, fig_name='before1', phase=1)
 #
 #d1 = FreeSpace(l=1000, mx=1, my=1)
@@ -1991,7 +2025,7 @@ dfl3.prop_m(z=50, m=3)
 
 #plot_dfl(dfl1, fig_name='after3', phase=1)
 plot_dfl(dfl3, fig_name='after4', phase=1)
-
+#%%
 '''
 #dfl = generate_gaussian_dfl(1239.8/500*1e-9, shape=(3,3,501), dgrid=(1e-3,1e-3,400e-6), power_rms=(0.5e-3,0.5e-3,0.5e-6), 
 #                        power_center=(0,0,None), power_angle=(0,0), power_waistpos=(0,0), #wavelength=[4.20e-9,4.08e-9], 
