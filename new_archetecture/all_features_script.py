@@ -264,29 +264,21 @@ class Grid:
     def grid_ky(self):
         k = 2 * np.pi / self.dy
         return np.linspace(-k / 2, k / 2, self.Ny())
-
-    def grid_t(self):
-        return np.linspace(0, self.Lz()/speed_of_light, self.Nz())
-    
-    def grid_f(self):
-        df = 2 * np.pi * speed_of_light / self.Lz() # self.Lz() must be replaced with self.Tz()
-        
-        if self.xlamds is None:        
-            return np.linspace(-df / 2 * self.Nz(), df / 2 * self.Nz(), self.Nz())
-        
-        elif self.used_aprox == 'SVAE' and self.xlamds is not None:
-            f0 = 2 * np.pi * speed_of_light / self.xlamds
-            return np.linspace(f0 - df / 2 * self.Nz(), f0 + df / 2 * self.Nz(), self.Nz())
-        
-        else:
-            raise ValueError
-
+          
     def grid_z(self):
-        return self.grid_t() * speed_of_light
-
+        return np.linspace(0, self.Lz(), self.Nz())
+    
     def grid_kz(self):
-        return self.grid_f() / speed_of_light
-           
+        dk = 2 * pi / self.Lz()
+        k = 2 * pi / self.xlamds       
+        return np.linspace(k - dk / 2 * self.Nz(), k + dk / 2 * self.Nz(), self.Nz())    
+    
+#    def grid_t(self):
+#        return grid_z()/speed_of_light
+#    
+#    def grid_f(self):
+#        return grid_kz/speed_of_light
+#           
 
 class RadiationField(Grid):
     """
@@ -399,77 +391,30 @@ class RadiationField(Grid):
             return np.sum(self.intensity())
 
     def scale_kx(self):  # scale in meters or meters**-1
-        if self.domain_xy == 's':  # space domain
-            return np.linspace(-self.Lx() / 2, self.Lx() / 2, self.Nx())
-        elif self.domain_xy == 'k':  # inverse space domain
-            k = 2 * np.pi / self.dx
-            return np.linspace(-k / 2, k / 2, self.Nx())
-        else:
-            raise AttributeError('Wrong domain_xy attribute')
-
-    def scale_ky(self):  # scale in meters or meters**-1
-        if self.domain_xy == 's':  # space domain
-            return np.linspace(-self.Ly() / 2, self.Ly() / 2, self.Ny())
-        elif self.domain_xy == 'k':  # inverse space domain
-            k = 2 * np.pi / self.dy
-            return np.linspace(-k / 2, k / 2, self.Ny())
-        else:
-            raise AttributeError('Wrong domain_xy attribute')
-
-    def scale_kz(self):  # scale in meters or meters**-1
-        if self.domain_z == 't':  # time domain
-            return np.linspace(0, self.Lz(), self.Nz())
-        elif self.domain_z == 'f':  # frequency domain
-            dk = 2 * pi / self.Lz()
-            k = 2 * pi / self.xlamds
-            return np.linspace(k - dk / 2 * self.Nz(), k + dk / 2 * self.Nz(), self.Nz())
-        else:
-            raise AttributeError('Wrong domain_z attribute')
-
-    def scale_x(self):  # scale in meters or radians
-        if self.domain_xy == 's':  # space domain
-            return self.scale_kx()
-        elif self.domain_xy == 'k':  # inverse space domain
-            return self.scale_kx() * self.xlamds / 2 / np.pi
-        else:
-            raise AttributeError('Wrong domain_xy attribute')
-
-    def scale_y(self):  # scale in meters or radians
-        if self.domain_xy == 's':  # space domain
-            return self.scale_ky()
-        elif self.domain_xy == 'k':  # inverse space domain
-            return self.scale_ky() * self.xlamds / 2 / np.pi
-        else:
-            raise AttributeError('Wrong domain_xy attribute')
-
-    def scale_z(self):  # scale in meters
-        if self.domain_z == 't':  # time domain
-            return self.scale_kz()
-        elif self.domain_z == 'f':  # frequency domain
-            return 2 * pi / self.scale_kz()
-        else:
-            raise AttributeError('Wrong domain_z attribute')
-#   old scales for versions compatibility
-#   propper scales in meters or 2 pi / meters
-    '''
-    def scale_kx(self):  # scale in meters or meters**-1
         _logger.warning('"scale_kx" will be deprecated, use "grid_x and grid_kx" instead')
-        if 's' in [self.domain_xy, self.domain_x]:    # space domain
-            return self.grid_x()
-        elif 'k' in [self.domain_xy, self.domain_x]:  # inverse space domain
+
+#        if 's' in [self.domain_xy, self.domain_x]:    # space domain
+        if self.domain_xy == 's':    # space domain
+            return self.grid_x()        
+
+#        elif 'k' in [self.domain_xy, self.domain_x]:  # inverse space domain
+        elif self.domain_xy == 'k':  # inverse space domain
             return self.grid_kx()
+       
         else:
             raise AttributeError('Wrong domain_xy attribute')
 
     def scale_ky(self):  # scale in meters or meters**-1
         _logger.warning('"scale_ky" will be deprecated, use "grid_y and grid_ky" instead')
-        if 's' in [self.domain_xy, self.domain_y]:    # space domain
+#        if 's' in [self.domain_xy, self.domain_y]:    # space domain
+        if self.domain_xy == 's':    # space domain
             return self.grid_y()
-        elif 'k' in [self.domain_xy, self.domain_y]:  # inverse space domain
+#        elif 'k' in [self.domain_xy, self.domain_y]:  # inverse space domain
+        if self.domain_xy == 'k':    # space domain
             return self.grid_ky()
         else:
             raise AttributeError('Wrong domain_xy attribute')
-            
+    
     def scale_kz(self):  # scale in meters or meters**-1
         _logger.warning('"scale_kz" will be deprecated, use "grid_z and grid_kz" instead')        
         if self.domain_z == 't':  # time domain
@@ -480,7 +425,7 @@ class RadiationField(Grid):
             raise AttributeError('Wrong domain_z attribute')
 
     def scale_x(self):  # scale in meters or radians
-        _logger.warning('"scale_x" will be deprecated, use "grid_x and grid_kx" instead')        
+#        _logger.warning('"scale_x" will be deprecated, use "grid_x and grid_kx" instead')        
         if self.domain_xy == 's':  # space domain
             return self.scale_kx()
         elif self.domain_xy == 'k':  # inverse space domain
@@ -503,7 +448,7 @@ class RadiationField(Grid):
             return 2 * pi / self.scale_kz()
         else:
             raise AttributeError('Wrong domain_z attribute')
-    '''
+
     def ph_sp_dens(self):
         if self.domain_z == 't':
             dfl = deepcopy(self)
@@ -1662,7 +1607,6 @@ class PropMask(Mask):
        
         k_x, k_y = np.meshgrid(self.grid_kx(), self.grid_ky())
         
-        
         if dfl.domain_z == 'f':
             k = self.grid_kz()
             self.mask = [np.exp(1j * self.z0 * (np.sqrt(k[i] ** 2 - k_x ** 2 - k_y ** 2) - k[i])) for i in range(dfl.Nz())] 
@@ -1742,14 +1686,16 @@ class Prop_mMask(Mask):
                
         dfl.dx *= self.mx #transform grid to output mesh size
         dfl.dy *= self.my        
-
+        self.dx *= self.mx #transform grid to output mesh size
+        self.dy *= self.my   
+        
         dfl.to_domain(domains) # back to original domain
         
         if self.mx != 1:
-            dfl.curve_wavefront(-self.mx / (self.mx - 1), plane='x')
+            dfl.curve_wavefront(-self.mx * self.z0 / (self.mx - 1), plane='x')
 #            dfl = QuadCurvMask(r = -self.mx * self.z0 / (self.mx - 1), plane='x').apply(dfl)
         if self.my != 1:
-            dfl.curve_wavefront(-self.my / (self.my - 1), plane='y')
+            dfl.curve_wavefront(-self.my * self.z0 / (self.my - 1), plane='y')
 #            dfl = QuadCurvMask(r = -self.my * self.z0 / (self.my - 1), plane='y').apply(dfl)
 
         t_func = time.time() - start
@@ -1762,88 +1708,27 @@ class Prop_mMask(Mask):
         self.copy_grid(dfl)
         
         k_x, k_y = np.meshgrid(self.grid_kx(), self.grid_ky())
-        Hx = np.zeros(dfl.shape, dtype=complex128)  # (z,y,x)
-        Hy = np.zeros(dfl.shape, dtype=complex128)  # (z,y,x)
         if dfl.domain_z == 'f':
+            self.mask = np.ones(dfl.shape, dtype=complex128)
             k = self.grid_kz()
             if self.mx != 0:
+#                self.mask[i,:,:] *= [np.exp(1j * self.z0/self.mx * (np.sqrt(k[i] ** 2 - k_x ** 2) - k[i])) for i in range(dfl.Nz())] #Hx = exp(iz0/mx(k^2 - kx^2)^(1/2) - k)
                 for i in range(self.Nz()):
-                    Hx[i, :, :] = np.exp(1j * self.z0 / self.mx * (np.sqrt(k[i] ** 2 - k_x ** 2) - k[i]))
-#                    Hx = [np.exp(1j * self.z0/self.mx * (np.sqrt(k[i] ** 2 - k_x ** 2) - k[i])) for i in range(dfl.Nz())] #Hx = exp(iz0/mx(k^2 - kx^2)^(1/2) - k)
+                    self.mask[i,:,:] *= np.exp(1j * self.z0 / self.mx * (np.sqrt(k[i] ** 2 - k_x ** 2) - k[i]))
             if self.my != 0:
+#                self.mask[i,:,:] *= [np.exp(1j * self.z0/self.my * (np.sqrt(k[i] ** 2 - k_y ** 2) - k[i])) for i in range(dfl.Nz())] #Hy = exp(iz0/my(k^2 - ky^2)^(1/2) - k)                   
                 for i in range(self.Nz()):
-                    Hy[i, :, :] = np.exp(1j * self.z0 / self.my * (np.sqrt(k[i] ** 2 - k_y ** 2) - k[i]))
-#                    Hy = [np.exp(1j * self.z0/self.my * (np.sqrt(k[i] ** 2 - k_y ** 2) - k[i])) for i in range(dfl.Nz())] #Hy = exp(iz0/my(k^2 - ky^2)^(1/2) - k)                  
-            print(np.shape(Hx), np.shape(Hy))
-            self.mask = Hx * Hy
-            
-        
-        
-#        
-#        elif dfl.domain_z == 't':
-#            k = 2 * np.pi / self.xlamds
-#            Hx = [np.exp(1j * self.z0/self.mx * (np.sqrt(k ** 2 - k_x ** 2) - k)) for i in range(dfl.Nz())] 
-#            Hy = [np.exp(1j * self.z0/self.my * (np.sqrt(k ** 2 - k_y ** 2) - k)) for i in range(dfl.Nz())]          
-#            self.mask = Hx*Hy
+                    self.mask[i,:,:] *= np.exp(1j * self.z0 / self.my * (np.sqrt(k[i] ** 2 - k_y ** 2) - k[i]))
+        elif dfl.domain_z == 't':
+            k = 2 * np.pi / self.xlamds
+            Hx = [np.exp(1j * self.z0/self.mx * (np.sqrt(k ** 2 - k_x ** 2) - k)) for i in range(dfl.Nz())] 
+            Hy = [np.exp(1j * self.z0/self.my * (np.sqrt(k ** 2 - k_y ** 2) - k)) for i in range(dfl.Nz())]          
+            self.mask = Hx*Hy
         else: 
             raise ValueError('wrong field domain, domain must be ks or kf ')    
             
         return self.mask
-
-'''    
-class яв(Mask):
-    """
-    Delete this excessive class
-    """
-    def __init__(self, z0, mx, my):
-        Mask.__init__(self)
-        self.z0 = z0
-        self.mx = mx 
-        self.my = my 
-        self.mask = None
-        self.type = 'PropMask'  #type of propagation, also may be 
-        # 'Fraunhofer_Propagator'
-        # 'Fresnel_Propagator' . . .
-
-    def apply(self, dfl):         
-        if self.mask is None:         
-            if self.type == 'PropMask' and self.mx == 1 and self.my == 1:
-                dfl = PropMask(z0 = self.z0).apply(dfl)
-            
-            elif self.type == 'Prop_mMask' or (self.mx != 1 or self.my != 1):
-                dfl = Prop_mMask(z0 = self.z0, mx = self.mx, my = self.my).apply(dfl)
-            
-            elif self.type == 'Fraunhofer_Propagator':
-                pass
-            
-            elif self.type == 'Fresnel_Propagator':
-                pass
-            
-            else:
-                raise ValueError("check a propagation type")
-            
-        return dfl
-        
-    def get_mask(self, dfl):
-        if self.type == 'PropMask' and self.mx == 1 and self.my == 1:
-            self.mask = PropMask(z0 = self.z0).get(dfl)
-        
-        elif self.type == 'Prop_mMask' and self.mx != 1 and self.my != 1:
-            self.mask = Prop_mMask(z0 = self.z0, mx = self.mx, my = self.my).get(dfl)
-        
-        elif self.type == 'Fraunhofer_Propagator':
-            pass
-        
-        elif self.type == 'Fresnel_Propagator':
-            pass
-        
-        else:
-            raise ValueError("check a propagation type")
-     
-        
-        return self.mask
-'''
-        
+      
 class PhaseDelayMask(Mask):
     """
     The function adds a phase shift to a fld object. The expression for the phase see in the calc_phase_delay function
@@ -2063,7 +1948,7 @@ class HeightErrorMask_1D(Mask):
 dfl = RadiationField()
 E_pohoton = 8000 #central photon energy [eV]
 kwargs={'xlamds':(h_eV_s * speed_of_light / E_pohoton), #[m] - central wavelength
-        'shape':(301,301,10),           #(x,y,z) shape of field matrix (reversed) to dfl.fld
+        'shape':(101,101,1),           #(x,y,z) shape of field matrix (reversed) to dfl.fld
         'dgrid':(500e-6,500e-6,1e-6), #(x,y,z) [m] - size of field matrix
         'power_rms':(10e-6,10e-6,0.1e-6),#(x,y,z) [m] - rms size of the radiation distribution (gaussian)
         'power_center':(0,0,None),     #(x,y,z) [m] - position of the radiation distribution
@@ -2081,31 +1966,31 @@ dfl = generate_gaussian_dfl(**kwargs);
 dfl1 = generate_gaussian_dfl(**kwargs);  #Gaussian beam defenition
 dfl2 = generate_gaussian_dfl(**kwargs);  #Gaussian beam defenition
 
-plot_dfl(dfl2, fig_name='before1', phase=1)
+#plot_dfl(dfl1, fig_name='before1', phase=1)
 #
 #d1 = FreeSpace(l=1000, mx=1, my=1)
-#d2 = FreeSpace(l=1000, mx=2, my=2)
+d2 = FreeSpace(l=50, mx=3, my=3)
 #
 #line1 = (d1)
-#line2 = (d2)
+line2 = (d2)
 #
 #lat1 = OpticsLine(line1)
-#lat2 = OpticsLine(line2)
+lat2 = OpticsLine(line2)
 #
 #dfl1 = propagate(lat1, dfl1)
-#dfl2 = propagate(lat2, dfl2)
+dfl2 = propagate(lat2, dfl2)
 #
 #plot_dfl(dfl1, fig_name='after1', phase=1)
-#plot_dfl(dfl2, fig_name='after2', phase=1)
+plot_dfl(dfl2, fig_name='after2', phase=1)
 
-dfl1 = generate_gaussian_dfl(**kwargs);  #Gaussian beam defenition
-dfl2 = generate_gaussian_dfl(**kwargs);  #Gaussian beam defenition
+#dfl1 = generate_gaussian_dfl(**kwargs);  #Gaussian beam defenition
+dfl3 = generate_gaussian_dfl(**kwargs);  #Gaussian beam defenition
 
-dfl1 = dfl1.prop(z=50, return_result=1)
-dfl2 = dfl2.prop_m(z=50, m=1, return_result=1)
+#dfl3.prop(z=50)
+dfl3.prop_m(z=50, m=3)
 
-plot_dfl(dfl1, fig_name='after3', phase=1)
-plot_dfl(dfl2, fig_name='after4', phase=1)
+#plot_dfl(dfl1, fig_name='after3', phase=1)
+plot_dfl(dfl3, fig_name='after4', phase=1)
 
 '''
 #dfl = generate_gaussian_dfl(1239.8/500*1e-9, shape=(3,3,501), dgrid=(1e-3,1e-3,400e-6), power_rms=(0.5e-3,0.5e-3,0.5e-6), 
