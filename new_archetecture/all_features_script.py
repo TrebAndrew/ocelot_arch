@@ -13,7 +13,8 @@ import os
 from ocelot.common.globals import *
 from ocelot.common.math_op import find_nearest_idx, fwhm, std_moment, bin_scale, bin_array, mut_coh_func
 from ocelot.common.py_func import filename_from_path
-from ocelot.gui.dfl_plot import plot_dfl
+from ocelot.optics.wave import wigner_dfl
+from ocelot.gui.dfl_plot import plot_dfl, plot_wigner
 from ocelot.optics.wave import RadiationField
 
 # from ocelot.optics.utils import calc_ph_sp_dens
@@ -193,7 +194,7 @@ class Grid:
         self.dx = []
         self.dy = []
         self.dz = []
-        self.shape = shape
+        self.shapes = shape
         self.xlamds = None
         self.used_aprox = 'SVAA'
 
@@ -220,7 +221,10 @@ class Grid:
                 setattr(self, attr, getattr(other, attr))
         else:
             raise ValueError
-            
+    
+    def shape(self):
+        return self.shapes
+
     def Lz(self):  
         '''
         full longitudinal mesh size
@@ -243,19 +247,19 @@ class Grid:
         '''
         number of points in z
         '''
-        return self.shape[0]
+        return self.shapes[0]
 
     def Ny(self):
         '''
         number of points in y
         '''
-        return self.shape[1]
+        return self.shapes[1]
 
     def Nx(self):
         '''
         number of points in x
         '''
-        return self.shape[2]
+        return self.shapes[2]
     
     def grid_x(self):
         return np.linspace(-self.Lx() / 2, self.Lx() / 2, self.Nx())
@@ -1000,6 +1004,261 @@ class HeightProfile: # this one is here because generate_1d_profile is a method
         np.random.seed()
         
         return height_profile
+
+def imitate_sase_dfl(xlamds, rho=2e-4, seed=None, **kwargs):
+    """
+    imitation of SASE radiation in 3D
+
+    xlamds - wavelength of the substracted fast-varying component
+    rho - half of the expected FEL bandwidth
+    **kwargs identical to generate_dfl()
+
+    returns RadiationField object
+    """
+
+    _logger.info('imitating SASE radiation')
+    if kwargs.get('wavelength', None) is not None:
+        E0 = h_eV_s * speed_of_light / kwargs.pop('wavelength')
+        _logger.debug(ind_str + 'using wavelength')
+    else:
+        E0 = h_eV_s * speed_of_light / xlamds
+        _logger.debug(ind_str + 'using xlamds')
+    dE = E0 * 2 * rho
+    _logger.debug(ind_str + 'E0 = {}'.format(E0))
+    _logger.debug(ind_str + 'dE = {}'.format(dE))
+    dfl = generate_gaussian_dfl(xlamds, **kwargs)
+
+    _logger.debug(ind_str + 'dfl.shape = {}'.format(dfl.shape()))
+    td_scale = dfl.scale_z()
+    _logger.debug(ind_str + 'time domain range = [{},  {}]m'.format(td_scale[0], td_scale[-1]))
+
+    dk = 2 * np.pi / dfl.Lz()
+    k = 2 * np.pi / dfl.xlamds
+    fd_scale_ev = h_eV_s * speed_of_light * (
+        np.linspace(k - dk / 2 * dfl.Nz(), k + dk / 2 * dfl.Nz(), dfl.Nz())) / 2 / np.pi
+    fd_env = np.exp(-(fd_scale_ev - E0) ** 2 / 2 / (dE) ** 2)
+    _logger.debug(ind_str + 'frequency domain range = [{},  {}]eV'.format(fd_scale_ev[0], fd_scale_ev[-1]))
+    
+    for key in imitate_1d_sase_like.__code__.co_varnames:
+        kwargs.pop(key, None)
+        
+    _, td_envelope, _, _ = imitate_1d_sase_like(td_scale=td_scale, td_env=np.ones_like(td_scale), fd_scale=fd_scale_ev,
+                                                fd_env=fd_env, td_phase=None, fd_phase=None, phen0=None, en_pulse=1,
+                                                fit_scale='td', n_events=1, seed=seed, **kwargs)
+
+    dfl.fld *= td_envelope[:, :, np.newaxis]
+
+    return dfl
+
+def calc_ph_sp_dens(spec, freq_ev, n_photons, spec_squared=1):
+    """
+    calculates number of photons per electronvolt
+    """
+    # _logger.debug('spec.shape = {}'.format(spec.shape))
+    if spec.ndim == 1:
+        axis = 0
+    else:
+        if spec.shape[0] == freq_ev.shape[0]:
+            spec = spec.T
+        axis = 1
+        #     axis=0
+        # elif spec.shape[1] == freq_ev.shape[0]:
+        #     axis=1
+        # else:
+        #     raise ValueError('operands could not be broadcast together with shapes ', spec.shape, ' and ', freq_ev.shape)
+    # _logger.debug('spec.shape = {}'.format(spec.shape))
+
+    if spec_squared:
+        spec_sum = np.trapz(spec, x=freq_ev, axis=axis)
+    else:
+        spec_sum = np.trapz(abs(spec) ** 2, x=freq_ev, axis=axis)
+
+    if np.size(spec_sum) == 1:
+        if spec_sum == 0:  # avoid division by zero
+            spec_sum = np.inf
+    else:
+        spec_sum[spec_sum == 0] = np.inf  # avoid division by zero
+
+    if spec_squared:
+        norm_factor = n_photons / spec_sum
+    else:
+        norm_factor = np.sqrt(n_photons / spec_sum)
+
+    if spec.ndim == 2:
+        norm_factor = norm_factor[:, np.newaxis]
+    # _logger.debug('spec.shape = {}'.format(spec.shape))
+    # _logger.debug('norm_factor.shape = {}'.format(norm_factor.shape))
+    spec = spec * norm_factor
+    if axis == 1:
+        spec = spec.T
+    # _logger.debug('spec.shape = {}'.format(spec.shape))
+    return spec
+
+def imitate_1d_sase_like(td_scale, td_env, fd_scale, fd_env, td_phase=None, fd_phase=None, phen0=None, en_pulse=None,
+                         fit_scale='td', n_events=1, **kwargs):
+    """
+    Models FEL pulse(s) based on Gaussian statistics
+    td_scale - scale of the pulse on time domain [m]
+    td_env - expected pulse envelope in time domain [W]
+    fd_scale - scale of the pulse in frequency domain [eV]
+    fd_env - expected pulse envelope in frequency domain [a.u.]
+    td_phase - additional phase chirp to be added in time domain
+    fd_phase - additional phase chirp to be added in frequency domain
+    phen0 - sampling wavelength expressed in photon energy [eV]
+    en_pulse - expected average energy of the pulses [J]
+    fit_scale - defines the scale in which outputs should be returned:
+        'td' - time domain scale td_scale is used for the outputs, frequency domain phase and envelope will be re-interpolated
+        'fd' - frequency domain scale fd_scale is used for the outputs, time domain phase and envelope will be re-interpolated
+    n_events - number of spectra to be generated
+
+    returns tuple of 4 arguments: (ph_en, fd, s, td)
+    fd_scale - colunm of photon energies in eV
+    fd - matrix of radiation in frequency domain with shape, normalized such that np.sum(abs(fd)**2) is photon spectral density, i.e: np.sum(abs(fd)**2)*fd_scale = N_photons
+    td - matrix of radiation in time domain, normalized such that abs(td)**2 = radiation_power in [w]
+    """
+
+    _logger.info('generating 1d radiation field imitating SASE')
+    
+    seed = kwargs.get('seed', None)
+    if seed is not None:
+        np.random.seed(seed)
+
+    if fit_scale == 'td':
+
+        n_points = len(td_scale)
+        s = td_scale
+        Ds = (td_scale[-1] - td_scale[0])
+        ds = Ds / n_points
+
+        td = np.random.randn(n_points, n_events) + 1j * np.random.randn(n_points, n_events)
+        td *= np.sqrt(td_env[:, np.newaxis])
+        fd = np.fft.ifftshift(np.fft.fft(np.fft.fftshift(td, axes=0), axis=0), axes=0)
+        # fd = np.fft.ifft(td, axis=0)
+        # fd = np.fft.fftshift(fd, axes=0)
+
+        if phen0 is not None:
+            e_0 = phen0
+        else:
+            e_0 = np.mean(fd_scale)
+
+        # internal interpolated values
+        fd_scale_i = h_eV_s * np.fft.fftfreq(n_points, d=(
+                ds / speed_of_light)) + e_0  # internal freq.domain scale based on td_scale
+        fd_scale_i = np.fft.fftshift(fd_scale_i, axes=0)
+        fd_env_i = np.interp(fd_scale_i, fd_scale, fd_env, right=0, left=0)
+
+        if fd_phase is None:
+            fd_phase_i = np.zeros_like(fd_env_i)
+        else:
+            fd_phase_i = np.interp(fd_scale_i, fd_scale, fd_phase, right=0, left=0)
+
+        fd *= np.sqrt(fd_env_i[:, np.newaxis]) * np.exp(1j * fd_phase_i[:, np.newaxis])
+
+        # td = np.fft.ifftshift(fd, axes=0)
+        # td = np.fft.fft(td, axis=0)
+        td = np.fft.ifftshift(np.fft.ifft(np.fft.fftshift(fd, axes=0), axis=0), axes=0)
+
+        td_scale_i = td_scale
+
+    elif fit_scale == 'fd':
+
+        n_points = len(fd_scale)
+        Df = abs(fd_scale[-1] - fd_scale[0]) / h_eV_s
+        df = Df / n_points
+
+        fd = np.random.randn(n_points, n_events) + 1j * np.random.randn(n_points, n_events)
+        fd *= np.sqrt(fd_env[:, np.newaxis])
+        td = np.fft.ifftshift(np.fft.ifft(np.fft.fftshift(fd, axes=0), axis=0), axes=0)
+
+        td_scale_i = np.fft.fftfreq(n_points, d=df) * speed_of_light
+        td_scale_i = np.fft.fftshift(td_scale_i, axes=0)
+        td_scale_i -= np.amin(td_scale_i)
+        td_env_i = np.interp(td_scale_i, td_scale, td_env, right=0, left=0)
+
+        if td_phase is None:
+            td_phase_i = np.zeros_like(td_env_i)
+        else:
+            td_phase_i = np.interp(td_scale_i, td_scale, td_phase, right=0, left=0)
+
+        td *= np.sqrt(td_env_i[:, np.newaxis]) * np.exp(1j * td_phase_i[:, np.newaxis])
+
+        fd = np.fft.ifftshift(np.fft.fft(np.fft.fftshift(td, axes=0), axis=0), axes=0)
+
+        fd_scale_i = fd_scale
+
+    else:
+        raise ValueError('fit_scale should be either "td" of "fd"')
+
+    # normalization for pulse energy
+    if en_pulse == None:
+        _logger.debug(ind_str + 'no en_pulse provided, calculating from integral of td_env')
+        en_pulse = np.trapz(td_env, td_scale / speed_of_light)
+
+    pulse_energies = np.trapz(abs(td) ** 2, td_scale_i / speed_of_light, axis=0)
+    scale_coeff = en_pulse / np.mean(pulse_energies)
+    td *= np.sqrt(scale_coeff)
+
+    # normalization for photon spectral density
+    spec = np.mean(np.abs(fd) ** 2, axis=1)
+    spec_center = np.sum(spec * fd_scale_i) / np.sum(spec)
+
+    n_photons = pulse_energies * scale_coeff / q_e / spec_center
+    fd = calc_ph_sp_dens(fd, fd_scale_i, n_photons, spec_squared=0)
+    td_scale, fd_scale = td_scale_i, fd_scale_i
+
+    np.random.seed()
+
+    return (td_scale, td, fd_scale, fd)
+
+
+def imitate_1d_sase(spec_center=500, spec_res=0.01, spec_width=2.5, spec_range=(None, None), pulse_length=6,
+                    en_pulse=1e-3, flattop=0, n_events=1, spec_extend=5, **kwargs):
+    """
+    Models FEL pulse(s) based on Gaussian statistics
+    spec_center - central photon energy in eV
+    spec_res - spectral resolution in eV
+    spec_width - width of spectrum in eV (fwhm of E**2)
+    spec_range = (E1, E2) - energy range of the spectrum. If not defined, spec_range = (spec_center - spec_width * spec_extend, spec_center + spec_width * spec_extend)
+    pulse_length - longitudinal size of the pulse in um (fwhm of E**2)
+    en_pulse - expected average energy of the pulses in Joules
+    flattop - if true, flat-top pulse in time domain is generated with length 'pulse_length' in um
+    n_events - number of spectra to be generated
+
+    return tuple of 4 arguments: (s, td, ph_en, fd)
+    ph_en - colunm of photon energies in eV with size (spec_range[2]-spec_range[1])/spec_res
+    fd - matrix of radiation in frequency domain with shape ((spec_range[2]-spec_range[1])/spec_res, n_events), normalized such that np.sum(abs(fd)**2) is photon spectral density, i.e: np.sum(abs(fd)**2)*spec_res = N_photons
+    s - colunm of longitudinal positions along the pulse in yime domain in um
+    td - matrix of radiation in time domain with shape ((spec_range[2]-spec_range[1])/spec_res, n_events), normalized such that abs(td)**2 = radiation_power
+    """
+
+    if spec_range == (None, None):
+        spec_range = (spec_center - spec_width * spec_extend, spec_center + spec_width * spec_extend)
+    elif spec_center == None:
+        spec_center = (spec_range[1] + spec_range[0]) / 2
+
+    pulse_length_sigm = pulse_length / (2 * np.sqrt(2 * np.log(2)))
+    spec_width_sigm = spec_width / (2 * np.sqrt(2 * np.log(2)))
+
+    fd_scale = np.arange(spec_range[0], spec_range[1], spec_res)
+    n_points = len(fd_scale)
+    _logger.debug(ind_str + 'N_points * N_events = %i * %i' % (n_points, n_events))
+
+    fd_env = np.exp(-(fd_scale - spec_center) ** 2 / 2 / spec_width_sigm ** 2)
+    td_scale = np.linspace(0, 2 * np.pi / (fd_scale[1] - fd_scale[0]) * hr_eV_s * speed_of_light, n_points)
+
+    if flattop:
+        td_env = np.zeros_like(td_scale)
+        il = find_nearest_idx(td_scale, np.mean(td_scale) - pulse_length * 1e-6 / 2)
+        ir = find_nearest_idx(td_scale, np.mean(td_scale) + pulse_length * 1e-6 / 2)
+        td_env[il:ir] = 1
+    else:
+        s0 = np.mean(td_scale)
+        td_env = np.exp(-(td_scale - s0) ** 2 / 2 / (pulse_length_sigm * 1e-6) ** 2)
+
+    result = imitate_1d_sase_like(td_scale, td_env, fd_scale, fd_env, phen0=spec_center, en_pulse=en_pulse,
+                                  fit_scale='fd', n_events=n_events, **kwargs)
+
+    return result
     
 def dfldomain_check(domains, both_req=False):
     err = ValueError(
@@ -1093,26 +1352,16 @@ def get_transfer_function(element):
     elif element.__class__ is ThinLens: 
         element.mask = LensMask(element.fx, element.fy)
   
-    elif element.__class__ is ApertureRect: #no cheked
-        mask = ApertureRectMask()
-        mask.lx = element.lx
-        mask.ly = element.ly
-        mask.cx = element.cx
-        mask.cy = element.cy
-        element.mask = mask
+    elif element.__class__ is ApertureRect: 
+        element.mask = ApertureRectMask(element.lx, element.ly, element.cx, element.cy)
         
     elif element.__class__ is ApertureEllips: #no checked
-        mask = ApertureEllipsMask() #which way is better?
-        mask.ax = element.ax
-        mask.ay = element.ay
-        mask.cx = element.cx
-        mask.cy = element.cy
-        element.mask = mask
-      
+        element.mask = ApertureEllipsMask(element.ax, element.ay, element.cx, element.cy)
+        
     elif element.__class__ is DispersiveSection: #no checked
         element.mask = PhaseDelayMask(element.coeff, element.E_ph0)
         
-    elif element.__class__ is ImperfectMirror: #no checked
+    elif element.__class__ is ImperfectMirrorSurface: #no checked
         element.mask = MirrorMask(element.height_profile, element.hrms, element.angle, element.plane, element.lx, element.ly)
 
     else:
@@ -1146,20 +1395,20 @@ class OpticsElement:
     def __init__(self, eid=None):
         self.eid = eid
         
-    def apply(self, dfl): #is this method need?
-        """
-        TODO
-        write documentation
-        """
-        get_transfer_function(self)
-        self.mask.apply(self.mask, dfl)
+#    def apply(self, dfl): #is this method need?
+#        """
+#        TODO
+#        write documentation
+#        """
+#        get_transfer_function(self)
+#        self.mask.apply(self.mask, dfl)
            
 class FreeSpace(OpticsElement):
     """
     Class for Drift element 
     :param OpticsElement(): optics element parent class with following parameters
         :param eid: element id, (for example 'KB')  
-    :param l: propagation distance
+    :param l: propagation distance, [m]
     :param mx: is the output x mesh size in terms of input mesh size (mx = Lx_out/Lx_inp)
     :param my: is the output y mesh size in terms of input mesh size (my = Ly_out/Ly_inp)
     """
@@ -1177,8 +1426,8 @@ class ThinLens(OpticsElement):
     Class for Lens element
     :param OpticsElement(): optics element parent class with following parameters
         :param eid: element id, (for example 'KB') 
-    :param fx: focus length in x direction
-    :param fy: focus length in y direction
+    :param fx: focus length in x direction, [m]
+    :param fy: focus length in y direction, [m]
     """
     def __init__(self, fx=np.inf, fy=np.inf, eid=None):
         OpticsElement.__init__(self, eid=eid)
@@ -1188,7 +1437,7 @@ class ThinLens(OpticsElement):
 class Aperture(OpticsElement):
     """
     Aperture
-    write documentation
+    :param eid: id of the optical element
     """
     def __init__(self, eid=None):
         OpticsElement.__init__(self, eid=eid)
@@ -1196,12 +1445,17 @@ class Aperture(OpticsElement):
 class ApertureRect(Aperture):
     """
     Rectangular aperture
-    
-    write documentation
+    :param Aperture(): optics element parent class with following parameters
+        :param eid: element id, (for example 'KB', 'Aperture') 
+    :param lx: horizonatal size of the aperture, [m]
+    :param ly: vertical size of the aperture, [m]
+    :param cx: x coprdinate coordinate of the aperture center, [m] 
+    :param cy: y coprdinate coordinate of the aperture center, [m] 
+    :param eid: id of the optical element
     """
 
-    def __init__(self, lx=np.inf, ly=np.inf, cx=0., cy=0., eid=None):
-        Aperture.__init__(self, eid=eid)
+    def __init__(self, lx=np.inf, ly=np.inf, cx=0., cy=0.):
+        Aperture.__init__(self)
         self.lx = lx
         self.ly = ly
         self.cx = cx
@@ -1210,15 +1464,15 @@ class ApertureRect(Aperture):
 class ApertureEllips(Aperture):
     """
     Elliptical Aperture
-    ax =: ellipse x main axis
-    ay =: ellipse y main axis
-    cx =: ellipse x coordinate of center 
-    cy =: ellipse x coordinate of center 
-    eid =: - id of the optical element
+    :param ax: ellipse x main axis, [m]
+    :param ay: ellipse y main axis, [m]
+    :param cx: ellipse x coordinate of center, [m] 
+    :param cy: ellipse y coordinate of center, [m] 
+    :param eid: id of the optical element
     """
 
-    def __init__(self, ax=np.inf, ay=np.inf, cx=0., cy=0., eid=None):
-        Aperture.__init__(self, eid=eid)
+    def __init__(self, ax=np.inf, ay=np.inf, cx=0., cy=0.):
+        Aperture.__init__(self)
         self.ax = ax
         self.ay = ay
         self.cx = cx
@@ -1228,22 +1482,21 @@ class ApertureEllips(Aperture):
 class DispersiveSection(OpticsElement):
     """
     Dispersive Section
-        coeff --- 
-        coeff[0] =: measured in [rad]      --- phase
-        coeff[1] =: measured in [fm s ^ 1] --- group delay
-        coeff[2] =: measured in [fm s ^ 2] --- group delay dispersion (GDD)
-        coeff[3] =: measured in [fm s ^ 3] --- third-order dispersion (TOD)
-        ...
-        E_ph0 --- energy with respect to which the phase shift is calculated
-        eid --- id of the optical element
+        :param coeff:  
+            coeff[0] =: measured in [rad]      --- phase
+            coeff[1] =: measured in [fm s ^ 1] --- group delay
+            coeff[2] =: measured in [fm s ^ 2] --- group delay dispersion (GDD)
+            coeff[3] =: measured in [fm s ^ 3] --- third-order dispersion (TOD)
+            ...
+        :param E_ph0: energy with respect to which the phase shift is calculated
     """  
-    def __init__(self, coeff=[0], E_ph0=None, eid=None):
-        OpticsElement.__init__(self, eid=eid)
+    def __init__(self, coeff=[0], E_ph0=None):
+        OpticsElement.__init__(self)
         self.coeff = coeff
         self.E_ph0 = E_ph0
 
 
-class ImperfectMirror(OpticsElement):
+class ImperfectMirrorSurface(OpticsElement):
     """
     TODO
     write documentation
@@ -1264,9 +1517,9 @@ class Mask(Grid):
     Mask element class
     The class represents a transfer function of an optical element. Note, several masks can correspond to one optical element.
     :param Grid: with following parameters  
-        :params (dx, dy, dz): spatial step of the mesh 
+        :params (dx, dy, dz): spatial step of the mesh, [m] 
         :param shape: number of point in each direction of 3D data mesh
-        :param xlamds: carrier wavelength of the wavepacket
+        :param xlamds: carrier wavelength of the wavepacket, [m]
         :param used_aprox: the approximation used in solving the wave equation. OCELOT works in Slowly Varying Amplitude Approximation
     :param domain_z: longitudinal domain (t - time, f - frequency)   
     :param domain_x: transverse domain (s - space, k - inverse space)      
@@ -1459,14 +1712,11 @@ class Prop_mMask(Mask):
         self.dx *= self.mx #transform grid to output mesh size
         self.dy *= self.my   
         
-        print(id(dfl.dx), id(self.dx))
-        
         dfl.to_domain(domains) # back to the original domain
         
         if self.mx != 1:
 #            dfl.curve_wavefront(-self.mx * self.z0 / (self.mx - 1), plane='x')
             dfl = QuadCurvMask(r = -self.mx * self.z0 / (self.mx - 1), plane='x').apply(dfl)
-            print('aaaa')
         if self.my != 1:
 #            dfl.curve_wavefront(-self.my * self.z0 / (self.my - 1), plane='y')
             dfl = QuadCurvMask(r = -self.my * self.z0 / (self.my - 1), plane='y').apply(dfl)
@@ -1517,14 +1767,18 @@ class QuadCurvMask(Mask):
     """
     def __init__(self, r, plane):
         Mask.__init__(self)
-        self.r = r #is the radius of curvature
-        self.plane = plane #is the plane in which the curvature is applied
-        self.mask = None #is the transfer function itself
+        self.r = r 
+        self.plane = plane 
+        self.mask = None 
 
     def apply(self, dfl):
         """
-        TODO 
-        add documentation
+        'apply' method for QuadCurvMask class      
+        
+        get the mask using 'get_mask' method
+        convert the field to a spatial domain
+        multiply the mask and the field
+        convert the field to the original domain
         """
         domains = dfl.domain_z, dfl.domain_xy
         
@@ -1547,16 +1801,17 @@ class QuadCurvMask(Mask):
         if self.mask is None:
             self.get_mask(dfl) 
     
-        dfl.to_domain(self.domain_z + 's') #the field must be in 's' domain
+        dfl.to_domain(self.domain_z + 's')
         dfl.fld *= self.mask 
-        dfl.to_domain(domains) #return to the original domain
+        dfl.to_domain(domains) 
 
         return dfl
     
     def get_mask(self, dfl):
         """
-        TODO 
-        add documentation
+        'get_mask' method for QuadCurvMask class      
+        
+        TODO write a description 
         """        
         self.copy_grid(dfl)
        
@@ -1594,132 +1849,15 @@ class QuadCurvMask(Mask):
             
         return self.mask
 
-class ApertureRectMask(Mask):
-    """
-    TODO
-    write documentation
-    add logging
-    """
-    def __init__(self, lx=np.inf, ly=np.inf, cx=0, cy=0, shape=(0, 0, 0)):
-        Mask.__init__(self, shape=shape)
-        self.lx = lx
-        self.ly = ly
-        self.cx = cx
-        self.cy = cy
-        self.mask = None
-
-    def apply(self, dfl):
-        
-        if self.mask is None:
-            self.get_mask(dfl)
-        
-        mask_idx = np.where(self.mask == 0)
-
-        dfl_energy_orig = dfl.E()
-        dfl.fld[:, mask_idx[0], mask_idx[1]] = 0
-
-        if dfl_energy_orig == 0:
-            _logger.warn(ind_str + 'dfl_energy_orig = 0')
-        elif dfl.E() == 0:
-            _logger.warn(ind_str + 'done, %.2f%% energy lost' % (100))
-        else:
-            _logger.info(ind_str + 'done, %.2f%% energy lost' % ((dfl_energy_orig - dfl.E()) / dfl_energy_orig * 100))
-        return dfl
-
-    def get_mask(self, dfl):
-        """
-        model rectangular aperture to the radaition in either domain
-        """
-        _logger.info('applying square aperture to dfl')
-        
-        self.copy_grid(dfl)
-            
-        if np.size(self.lx) == 1:
-            self.lx = [-self.lx / 2, self.lx / 2]
-        if np.size(self.ly) == 1:
-            self.ly = [-self.ly / 2, self.ly / 2]
-        _logger.debug(ind_str + 'ap_x = {}'.format(self.lx))
-        _logger.debug(ind_str + 'ap_y = {}'.format(self.ly ))
-
-        idx_x = np.where((self.grid_x() >= self.lx[0]) & (self.grid_x() <= self.lx[1]))[0]
-        idx_x1 = idx_x[0]
-        idx_x2 = idx_x[-1]
-
-        idx_y = np.where((self.grid_y() >= self.ly [0]) & (self.grid_y() <= self.ly [1]))[0]
-        idx_y1 = idx_y[0]
-        idx_y2 = idx_y[-1]
-
-        _logger.debug(ind_str + 'idx_x = {}-{}'.format(idx_x1, idx_x2))
-        _logger.debug(ind_str + 'idx_y = {}-{}'.format(idx_y1, idx_y2))
-
-        self.mask = np.zeros_like(dfl.fld[0, :, :])
-        self.mask[idx_y1:idx_y2, idx_x1:idx_x2] = 1
-        return self.mask
-
-class ApertureEllipsMask(Mask):
-    """
-    TODO
-    write documentation
-    add logging
-    """
-    def __init__(self, shape=(0,0,0)):
-        Mask.__init__(self, shape=shape)
-        self.ax = np.inf
-        self.ay = np.inf
-        self.cx = 0
-        self.cy = 0
-        self.mask = None 
-    
-    def ellipse(self, dfl):    
-        x, y = np.meshgrid(self.grid_x(), self.grid_y())
-        xp =  (x - self.cx)*np.cos(pi) + (y - self.cy)*np.sin(pi)
-        yp = -(x - self.cx)*np.sin(pi) + (y - self.cy)*np.cos(pi)
-        return (2*xp/self.ax)**2 + (2*yp/self.ay)**2
-    
-    def apply(self, dfl):
-        """
-        apply elliptical aperture to the radaition in either domain
-        """
-        
-        _logger.info('applying elliptical aperture to dfl')
-        _logger.debug(ind_str + 'ap_x = {}'.format(self.ax) + 'cx = {}'.format(self.cx))
-        _logger.debug(ind_str + 'ap_y = {}'.format(self.ay) + 'cy = {}'.format(self.cy))
-
-        
-        if self.mask is None:
-            self.get_mask(dfl)
-        
-        mask_idx = np.where(self.mask == 0)
-
-        dfl_energy_orig = dfl.E()
-
-        dfl.fld[:, mask_idx[0], mask_idx[1]] = 0
-        
-        if dfl_energy_orig == 0:
-            _logger.warn(ind_str + 'dfl_energy_orig = 0')
-        elif dfl.E() == 0:
-            _logger.warn(ind_str + 'done, %.2f%% energy lost' % (100))
-        else:
-            _logger.info(ind_str + 'done, %.2f%% energy lost' % ((dfl_energy_orig - dfl.E()) / dfl_energy_orig * 100))
-            
-        return dfl
-    
-    def get_mask(self, dfl):
-        
-        self.copy_grid(dfl)
-        
-        self.mask = np.zeros_like(dfl.fld[0, :, :])
-        self.mask[self.ellipse(dfl) <= 1] = 1
-        return self.mask
-    
 class LensMask(Mask):
     """
-    TODO
-    write documentation
-    add logging
+    A thin ideal Lens mask
+
+    :param fx: focus length in x direction, [m]
+    :param fy: focus length in y direction, [m]
     """
-    def __init__(self, fx=np.inf, fy=np.inf, shape=(0, 0, 0)):
-        Mask.__init__(self, shape=shape)
+    def __init__(self, fx=np.inf, fy=np.inf):
+        Mask.__init__(self)
         self.fx = fx
         self.fy = fy
         self.mask = None
@@ -1745,23 +1883,165 @@ class LensMask(Mask):
         self.mask = H_fx * H_fy
       
         return self.mask
-
-
     
-       
+class ApertureRectMask(Mask):
+    """
+     Applies a rectangular appertire for a field
+     
+    :param lx: horizonatal size of the aperture, [m]
+    :param ly: vertical size of the aperture, [m]
+    :param cx: x coprdinate coordinate of the aperture center, [m] 
+    :param cy: y coprdinate coordinate of the aperture center, [m] 
+    :mask: the rectangular aperture transfer function
+    """
+    def __init__(self, lx=np.inf, ly=np.inf, cx=0, cy=0):
+        Mask.__init__(self)
+        self.lx = lx
+        self.ly = ly
+        self.cx = cx
+        self.cy = cy
+        self.mask = None
 
-      
+    def apply(self, dfl):
+        
+        domains = dfl.domain_z, dfl.domain_xy
+        self.domain_x = 's'
+        self.domain_y = 's'
+        if self.domain_z is None:
+            self.domain_z = dfl.domain_z
+        
+        dfl.to_domain(self.domain_z + 's')
+
+        if self.mask is None:
+            self.get_mask(dfl)
+                
+        mask_idx = np.where(self.mask == 0)
+
+        dfl_energy_orig = dfl.E()
+        dfl.fld[:, mask_idx[0], mask_idx[1]] = 0
+
+        if dfl_energy_orig == 0:
+            _logger.warn(ind_str + 'dfl_energy_orig = 0')
+        elif dfl.E() == 0:
+            _logger.warn(ind_str + 'done, %.2f%% energy lost' % (100))
+        else:
+            _logger.info(ind_str + 'done, %.2f%% energy lost' % ((dfl_energy_orig - dfl.E()) / dfl_energy_orig * 100))
+        
+        dfl.to_domain(domains) 
+        return dfl
+
+    def get_mask(self, dfl):
+        """
+        model a rectangular aperture to the radaition in 's' domain
+        """
+        _logger.info('applying square aperture to dfl')
+        
+        self.copy_grid(dfl)
+            
+        if np.size(self.lx) == 1:
+            self.lx = [-self.lx / 2, self.lx / 2]
+        if np.size(self.ly) == 1:
+            self.ly = [-self.ly / 2, self.ly / 2]
+        _logger.debug(ind_str + 'ap_x = {}'.format(self.lx))
+        _logger.debug(ind_str + 'ap_y = {}'.format(self.ly ))
+        print(self.lx, self.ly)
+        
+        idx_x = np.where((self.grid_x() >= self.lx[0]) & (self.grid_x() <= self.lx[1]))[0]
+        idx_x1 = idx_x[0]# + 1 #magic number
+        idx_x2 = idx_x[-1]  
+
+        idx_y = np.where((self.grid_y() >= self.ly[0]) & (self.grid_y() <= self.ly[1]))[0]
+        idx_y1 = idx_y[0]# + 1 #magic number
+        idx_y2 = idx_y[-1]# + 1 #magic number
+
+        _logger.debug(ind_str + 'idx_x = {}-{}'.format(idx_x1, idx_x2))
+        _logger.debug(ind_str + 'idx_y = {}-{}'.format(idx_y1, idx_y2))
+
+        self.mask = np.zeros_like(dfl.fld[0, :, :])
+        self.mask[idx_y1:idx_y2, idx_x1:idx_x2] = 1
+        
+        return self.mask
+
+class ApertureEllipsMask(Mask):
+    """
+     Applies a rectangular appertire for a field
+     
+    :param ax: ellipse x main axis, [m]
+    :param ay: ellipse y main axis, [m]
+    :param cx: ellipse x coordinate of center, [m] 
+    :param cy: ellipse y coordinate of center, [m]  
+    :mask: the elliptical aperture transfer function
+    """
+    def __init__(self, ax=np.inf, ay=np.inf, cx=0, cy=0):
+        Mask.__init__(self)
+        self.ax = ax
+        self.ay = ay
+        self.cx = cx
+        self.cy = cy
+        self.mask = None 
+    
+    def ellipse(self, dfl):    
+        x, y = np.meshgrid(self.grid_x(), self.grid_y())
+        xp =  (x - self.cx)*np.cos(pi) + (y - self.cy)*np.sin(pi)
+        yp = -(x - self.cx)*np.sin(pi) + (y - self.cy)*np.cos(pi)
+        return (2*xp/self.ax)**2 + (2*yp/self.ay)**2
+    
+    def apply(self, dfl):
+        """
+        apply elliptical aperture to the radaition in 's' domain
+        """
+        
+        _logger.info('applying elliptical aperture to dfl')
+        _logger.debug(ind_str + 'ap_x = {}'.format(self.ax) + 'cx = {}'.format(self.cx))
+        _logger.debug(ind_str + 'ap_y = {}'.format(self.ay) + 'cy = {}'.format(self.cy))
+
+        domains = dfl.domain_z, dfl.domain_xy
+        self.domain_x = 's'
+        self.domain_y = 's'
+        if self.domain_z is None:
+            self.domain_z = dfl.domain_z
+        
+        dfl.to_domain(self.domain_z + 's')
+        if self.mask is None:
+            self.get_mask(dfl)
+        
+        mask_idx = np.where(self.mask == 0)
+
+        dfl_energy_orig = dfl.E()
+        dfl.fld[:, mask_idx[0], mask_idx[1]] = 0
+        
+        if dfl_energy_orig == 0:
+            _logger.warn(ind_str + 'dfl_energy_orig = 0')
+        elif dfl.E() == 0:
+            _logger.warn(ind_str + 'done, %.2f%% energy lost' % (100))
+        else:
+            _logger.info(ind_str + 'done, %.2f%% energy lost' % ((dfl_energy_orig - dfl.E()) / dfl_energy_orig * 100))
+        
+        dfl.to_domain(domains) 
+        return dfl
+    
+    def get_mask(self, dfl):
+        
+        self.copy_grid(dfl)
+        
+        self.mask = np.zeros_like(dfl.fld[0, :, :])
+        self.mask[self.ellipse(dfl) <= 1] = 1
+        
+        return self.mask
+
 class PhaseDelayMask(Mask):
     """
-    The function adds a phase shift to a fld object. The expression for the phase see in the calc_phase_delay function
-    dfl   --- is a fld object
-    coeff --- 
+    The function adds a phase shift to a fld object. The expression for the phase 
+    -- coeff[0] + coeff[1]*(w - w0)/1! + coeff[2]*(w - w0)**2/2! + coeff[3]*(w - w0)**3/3!
+    
+    :param: coeff 
         coeff[0] =: measured in [rad]      --- phase
         coeff[1] =: measured in [fm s ^ 1] --- group delay
         coeff[2] =: measured in [fm s ^ 2] --- group delay dispersion (GDD)
         coeff[3] =: measured in [fm s ^ 3] --- third-order dispersion (TOD)
         ...
-    E_ph0 --- energy with respect to which the phase shift is calculated
+    :param E_ph0:  energy with respect to which the phase shift is calculated
+    :mask: phase delay aperture transfer function
     """
     def __init__(self, coeff, E_ph0):
         Mask.__init__(self)
@@ -1791,17 +2071,17 @@ class PhaseDelayMask(Mask):
         self.copy_grid(dfl)
         
         if self.E_ph0 == None:
-            w0 = 2 * np.pi * speed_of_light / self.xlamds
+            w0 = 2 * np.pi * speed_of_light / dfl.xlamds
     
         elif self.E_ph0 == 'center':
-            _, lamds = np.mean([dfl.int_z(), self.gird_z()], axis=(1))
-            w0 = 2 * np.pi * speed_of_light / lamds
+            _, k = np.mean([dfl.int_z(), dfl.grid_kz()], axis=(1))
+            w0 = speed_of_light * k
     
         elif isinstance(self.E_ph0, str) is not True:
             w0 = 2 * np.pi * self.E_ph0 / h_eV_s
     
         else:
-            raise ValueError("E_ph0 must be None or 'center' or some value")
+            raise ValueError("E_ph0 must be None or 'center' or some number")
 
         w = self.grid_kz() * speed_of_light
         delta_w = w - w0
@@ -1822,8 +2102,7 @@ class PhaseDelayMask(Mask):
         _logger.debug(ind_str + 'done')
         
         return self.mask
-        #####################################
-
+        
 class MirrorMask(Mask):
     """
     Class for simulating HeightProfile of highly polished mirror surface
@@ -1982,49 +2261,160 @@ kwargs={'xlamds':(h_eV_s * speed_of_light / E_pohoton), #[m] - central wavelengt
         'en_pulse':None,               #total energy or max power of the pulse, use only one
         'power':1e6,
         }
+
+kwargs1={'xlamds':(h_eV_s * speed_of_light / E_pohoton), #[m] - central wavelength
+        'shape':(251,251,1),           #(x,y,z) shape of field matrix (reversed) to dfl.fld
+        'dgrid':(500e-6,500e-6,1e-6), #(x,y,z) [m] - size of field matrix
+        'power_rms':(40.123e-6,40.642e-6,0.1e-6),#(x,y,z) [m] - rms size of the radiation distribution (gaussian)
+        'power_center':(0,0,None),     #(x,y,z) [m] - position of the radiation distribution
+        'power_angle':(0,0),           #(x,y) [rad] - angle of further radiation propagation
+        'power_waistpos':(0,0),     #(Z_x,Z_y) [m] downstrean location of the waist of the beam
+        'wavelength':None,             #central frequency of the radiation, if different from xlamds
+        'zsep':None,                   #distance between slices in z as zsep*xlamds
+        'freq_chirp':0,                #dw/dt=[1/fs**2] - requency chirp of the beam around power_center[2]
+        'en_pulse':None,               #total energy or max power of the pulse, use only one
+        'power':1e6,
+        }
 dfl = generate_gaussian_dfl(**kwargs);
 dfl1 = generate_gaussian_dfl(**kwargs);  #Gaussian beam defenition
 dfl2 = generate_gaussian_dfl(**kwargs);  #Gaussian beam defenition
 
 #%%
-###lens checking
-f=100
-lens = ThinLens(fx=f, fy=f)
-line1 = (lens)
-lat1 = OpticsLine(line1)
-dfl = propagate(lat1, dfl)
+###eightErrorMask_1D checkingkwargs={'xlamds':(h_eV_s * speed_of_light / E_pohoton), #[m] - central wavelength
+E_pohoton = 200 #central photon energy [eV]
+kwargs={'xlamds':(h_eV_s * speed_of_light / E_pohoton), #[m] - central wavelength
+        'rho':1.0e-4, 
+        'shape':(221,221,1),             #(x,y,z) shape of field matrix (reversed) to dfl.fld
+        'dgrid':(400e-5,400e-5,35e-6), #(x,y,z) [m] - size of field matrix
+        'power_rms':(25e-5,25e-5,3e-6),#(x,y,z) [m] - rms size of the radiation distribution (gaussian)
+        'power_center':(0,0,None),     #(x,y,z) [m] - position of the radiation distribution
+        'power_angle':(0,0),           #(x,y) [rad] - angle of further radiation propagation
+        'power_waistpos':(0,0),        #(Z_x,Z_y) [m] downstrean location of the waist of the beam
+        'wavelength':None,             #central frequency of the radiation, if different from xlamds
+        'zsep':None,                   #distance between slices in z as zsep*xlamds
+        'freq_chirp':0,                #dw/dt=[1/fs**2] - requency chirp of the beam around power_center[2]
+        'en_pulse':None,                #total energy or max power of the pulse, use only one
+        'power':1e6,
+        }
+dfl = generate_gaussian_dfl(**kwargs);  #Gaussian beam defenition
+plot_dfl(dfl, fig_name='before', phase=0)
 
-dfl1.curve_wavefront(r=f)
+#height_profile = HeightProfile().generate_1d_profile(hrms=1e-9)        
+#mirror = ImperfectMirror(height_profile=height_profile)
 
-plot_dfl(dfl, fig_name='after3', phase=1)
-plot_dfl(dfl1, fig_name='after4', phase=1)
+mirror = ImperfectMirrorSurface(hrms=1e-9, lx=0.0007, ly=0.0007, angle=15*np.pi/180, plane='x')
+
+line = (mirror)
+lat = OpticsLine(line)
+
+#hightErr = MirrorMask(hrms=1e-9)#HightErrorMask_1D(hrms=1e-9)
+#hightErr.apply(dfl)
+
+dfl = propagate(lat, dfl)                
+plot_dfl(dfl, fig_name='after', phase=0)
+
+
 #%%
-#PropMask and Prop_mMask cheking
-#plot_dfl(dfl1, fig_name='before1', phase=1)
+####Phase Delay checking
+#coeff = [0,0,-250,100]
 #
-#d1 = FreeSpace(l=1000, mx=1, my=1)
-d2 = FreeSpace(l=50, mx=3, my=3)
 #
-#line1 = (d1)
-line2 = (d2)
+#SASE_dfl = imitate_sase_dfl(1239.8/500*1e-9,rho=4e-4, shape=(3,3,2001), dgrid=(1e-3,1e-3,400e-6), power_rms=(0.5e-3,0.5e-3,5e-6), 
+#                        power_center=(0,0,None), power_angle=(0,0), power_waistpos=(0,0),
+#                        zsep=None, energy=None, power=10e6, debug=1)
 #
+#seed_dfl = generate_gaussian_dfl(1239.8/500*1e-9, shape=(3,3,2001), dgrid=(1e-3,1e-3,400e-6), power_rms=(0.5e-3,0.5e-3,0.5e-6), 
+#                        power_center=(0,0,None), power_angle=(0,0), power_waistpos=(0,0), #wavelength=[4.20e-9,4.08e-9], 
+#                        zsep=None, freq_chirp=0, energy=None, power=10e6, debug=1)
+#
+#wig = wigner_dfl(seed_dfl)
+#SASE_wig = wigner_dfl(SASE_dfl)
+#
+#plot_wigner(wig, fig_name = 'before', plot_moments=0)
+#plot_wigner(SASE_wig, fig_name = 'SASE_before', plot_moments=0)
+#
+#SASE_PD = DispersiveSection(coeff=coeff)#, E_ph0='center')
+#seed_PD = DispersiveSection(coeff=coeff)#, E_ph0='center')
+#
+#line1 = (SASE_PD)
+#line2 = (seed_PD)
 #lat1 = OpticsLine(line1)
-lat2 = OpticsLine(line2)
+#lat2 = OpticsLine(line2)
 #
-#dfl1 = propagate(lat1, dfl1)
-dfl2 = propagate(lat2, dfl2)
+#SASE_dfl = propagate(lat1, SASE_dfl)
+#seed_dfl = propagate(lat2, seed_dfl)
 #
-#plot_dfl(dfl1, fig_name='after1', phase=1)
-plot_dfl(dfl2, fig_name='after2', phase=1)
+#wig = wigner_dfl(seed_dfl)
+#SASE_wig = wigner_dfl(SASE_dfl)
+#
+#plot_wigner(wig, fig_name = 'after', plot_moments=0)
+#plot_wigner(SASE_wig, fig_name = 'SASE_after', plot_moments=0)
 
-#dfl1 = generate_gaussian_dfl(**kwargs);  #Gaussian beam defenition
-dfl3 = generate_gaussian_dfl(**kwargs);  #Gaussian beam defenition
-
-#dfl3.prop(z=50)
-dfl3.prop_m(z=50, m=3)
-
-#plot_dfl(dfl1, fig_name='after3', phase=1)
-plot_dfl(dfl3, fig_name='after4', phase=1)
+#%% 
+####Rectangular aperture checking
+#dfl = generate_gaussian_dfl(**kwargs1);
+#
+#ap = ApertureEllips(ax=40e-6, ay=70e-6, cx=0e-6, cy=0)
+#line1 = (ap)
+#lat1 = OpticsLine(line1)
+#dfl = propagate(lat1, dfl)
+#
+##dfl1.curve_wavefront(r=f)
+#
+#plot_dfl(dfl, fig_name='after3', phase=1)
+#%% 
+####Rectangular aperture checking
+#dfl = generate_gaussian_dfl(**kwargs1);
+#
+#ap = ApertureRect(lx=40e-6, ly=70e-6, cx=0, cy=0)
+#line1 = (ap)
+#lat1 = OpticsLine(line1)
+#dfl = propagate(lat1, dfl)
+#
+##dfl1.curve_wavefront(r=f)
+#
+#plot_dfl(dfl, fig_name='after3', phase=1)
+#%%
+#plot_dfl(dfl1, fig_name='after4', phase=1)
+##%%
+####lens checking
+#f=100
+#lens = ThinLens(fx=f, fy=f)
+#line1 = (lens)
+#lat1 = OpticsLine(line1)
+#dfl = propagate(lat1, dfl)
+#
+##dfl1.curve_wavefront(r=f)
+#
+#plot_dfl(dfl, fig_name='after3', phase=1)
+##plot_dfl(dfl1, fig_name='after4', phase=1)
+##%%
+##PropMask and Prop_mMask cheking
+##plot_dfl(dfl1, fig_name='before1', phase=1)
+##
+##d1 = FreeSpace(l=1000, mx=1, my=1)
+#d2 = FreeSpace(l=50, mx=3, my=3)
+##
+##line1 = (d1)
+#line2 = (d2)
+##
+##lat1 = OpticsLine(line1)
+#lat2 = OpticsLine(line2)
+##
+##dfl1 = propagate(lat1, dfl1)
+#dfl2 = propagate(lat2, dfl2)
+##
+##plot_dfl(dfl1, fig_name='after1', phase=1)
+#plot_dfl(dfl2, fig_name='after2', phase=1)
+#
+##dfl1 = generate_gaussian_dfl(**kwargs);  #Gaussian beam defenition
+#dfl3 = generate_gaussian_dfl(**kwargs);  #Gaussian beam defenition
+#
+##dfl3.prop(z=50)
+#dfl3.prop_m(z=50, m=3)
+#
+##plot_dfl(dfl1, fig_name='after3', phase=1)
+#plot_dfl(dfl3, fig_name='after4', phase=1)
 #%%
 '''
 #dfl = generate_gaussian_dfl(1239.8/500*1e-9, shape=(3,3,501), dgrid=(1e-3,1e-3,400e-6), power_rms=(0.5e-3,0.5e-3,0.5e-6), 
